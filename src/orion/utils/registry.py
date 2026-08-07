@@ -44,5 +44,9 @@ class Registry:
     def __contains__(self, name: str) -> bool:
         return name in self._store
 
+    def contains(self, name: str) -> bool:
+        """Compatibility-friendly explicit membership check."""
+        return name in self
+
     def names(self) -> list[str]:
         return sorted(self._store)

@@ -59,6 +59,16 @@ def _read_one(path: Path) -> pydicom.Dataset | None:
         return None
 
 
+def read_series_datasets(file_paths: list[Path]) -> list[tuple[Path, pydicom.Dataset]]:
+    """Read only image-bearing files, preserving no assumed input ordering."""
+    datasets: list[tuple[Path, pydicom.Dataset]] = []
+    for path in file_paths:
+        ds = _read_one(path)
+        if ds is not None and "PixelData" in ds:
+            datasets.append((path, ds))
+    return datasets
+
+
 def discover_series(study_dir: str | Path) -> dict[str, list[Path]]:
     """Walk a study directory and group all readable DICOM files by SeriesInstanceUID."""
     study_dir = Path(study_dir)
@@ -83,11 +93,7 @@ def _slice_normal(iop: list[float]) -> np.ndarray:
 
 def load_series(series_uid: str, file_paths: list[Path]) -> DicomSeries | None:
     """Load, correctly order, and rescale one DICOM series into a (S, H, W) volume."""
-    datasets = []
-    for p in file_paths:
-        ds = _read_one(p)
-        if ds is not None and "PixelData" in ds:
-            datasets.append((p, ds))
+    datasets = read_series_datasets(file_paths)
 
     if not datasets:
         return None
@@ -118,7 +124,16 @@ def load_series(series_uid: str, file_paths: list[Path]) -> DicomSeries | None:
 
     frames = []
     for ds in ordered_ds:
-        arr = ds.pixel_array.astype(np.float32)
+        try:
+            arr = ds.pixel_array.astype(np.float32)
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            # Compressed or malformed individual frames should not bring down a
+            # preprocessing job. The caller can still use the remaining series.
+            return None
+        if arr.ndim != 2:
+            # Enhanced multi-frame DICOM needs its own geometry handling; treating
+            # it as a conventional single frame would silently corrupt ordering.
+            return None
         slope = _safe_float(getattr(ds, "RescaleSlope", None), 1.0)
         intercept = _safe_float(getattr(ds, "RescaleIntercept", None), 0.0)
         frames.append(arr * slope + intercept)

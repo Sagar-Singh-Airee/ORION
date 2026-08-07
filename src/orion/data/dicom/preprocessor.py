@@ -6,11 +6,36 @@ Transforms raw DICOM pixel arrays into clean, standardized NumPy arrays ready fo
 neural networks. Handles VOI-LUT, photometric inversion, and spatial normalization.
 """
 
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, List
+
 import numpy as np
 import pydicom
 from pydicom.pixel_data_handlers.util import apply_voi_lut
-from loguru import logger
-from typing import List, Tuple
+try:
+    from scipy.ndimage import zoom
+except ImportError:  # pragma: no cover - scipy is a project dependency
+    zoom = None
+
+
+def _get(config: Any, key: str, default: Any = None) -> Any:
+    """Read a key from dicts and OmegaConf objects alike."""
+    if config is None:
+        return default
+    if isinstance(config, Mapping):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _nested(config: Any, *keys: str, default: Any = None) -> Any:
+    current = config
+    for key in keys:
+        current = _get(current, key, None)
+        if current is None:
+            return default
+    return current
 
 def fix_photometric_interpretation(image: np.ndarray, dicom_dataset: pydicom.FileDataset) -> np.ndarray:
     """
@@ -113,22 +138,60 @@ def normalize_intensity(volume: np.ndarray, method: str = "percentile",
     return volume
 
 
-def preprocess_volume(volume: np.ndarray, slices: List[pydicom.FileDataset], config: dict) -> np.ndarray:
+def select_slice_indices(num_slices: int, target_slices: int, strategy: str = "uniform") -> np.ndarray:
+    """Select deterministic, ordered slice indices without duplicate endpoints."""
+    if num_slices <= 0 or target_slices <= 0:
+        return np.empty(0, dtype=np.int64)
+    if strategy == "all" or num_slices <= target_slices:
+        return np.arange(num_slices, dtype=np.int64)
+    if strategy == "center":
+        start = max(0, (num_slices - target_slices) // 2)
+        return np.arange(start, start + target_slices, dtype=np.int64)
+    if strategy != "uniform":
+        raise ValueError(f"Unknown slice-selection strategy: {strategy}")
+    # Rounding can produce duplicate positions for close source/target sizes.
+    indices = np.linspace(0, num_slices - 1, target_slices).round().astype(np.int64)
+    return np.maximum.accumulate(indices)
+
+
+def resize_volume(volume: np.ndarray, image_size: tuple[int, int] | list[int]) -> np.ndarray:
+    """Resize in-plane dimensions while preserving slice count and float precision."""
+    target_h, target_w = (int(image_size[0]), int(image_size[1]))
+    if volume.ndim != 3:
+        raise ValueError(f"Expected (S, H, W) volume, got {volume.shape}")
+    if volume.shape[1:] == (target_h, target_w):
+        return volume.astype(np.float32, copy=False)
+    if zoom is None:
+        raise ImportError("scipy is required for resizing DICOM volumes")
+    factors = (1.0, target_h / volume.shape[1], target_w / volume.shape[2])
+    return zoom(volume, factors, order=1, prefilter=False).astype(np.float32, copy=False)
+
+
+def preprocess_volume(
+    volume: np.ndarray,
+    slices: List[pydicom.FileDataset] | None,
+    config: Any,
+) -> np.ndarray:
     """
     End-to-end preprocessing pipeline for a 3D volume.
     """
     # 1. We must process slice-by-slice for DICOM-specific corrections (photometric, VOI)
+    if volume.ndim != 3 or volume.shape[0] == 0:
+        raise ValueError(f"Expected a non-empty (S, H, W) volume, got {volume.shape}")
+    if slices is not None and len(slices) != len(volume):
+        raise ValueError("Number of DICOM datasets must match volume slice count")
+
     processed_slices = []
     
-    for i, ds in enumerate(slices):
+    for i in range(len(volume)):
         img = volume[i].copy()
-        
+        ds = slices[i] if slices is not None else None
         # Fix inversion
-        if config.get("fix_photometric", True):
+        if ds is not None and _get(config, "fix_photometric_interpretation", _get(config, "fix_photometric", True)):
             img = fix_photometric_interpretation(img, ds)
             
         # Apply clinical windowing
-        if config.get("apply_voi_lut", True):
+        if ds is not None and _get(config, "apply_voi_lut", True):
             img = apply_windowing(img, ds)
             
         processed_slices.append(img)
@@ -136,7 +199,23 @@ def preprocess_volume(volume: np.ndarray, slices: List[pydicom.FileDataset], con
     processed_vol = np.stack(processed_slices, axis=0)
     
     # 2. Global volume normalization
-    if config.get("normalize", True):
-        processed_vol = normalize_intensity(processed_vol)
+    norm_cfg = _get(config, "normalization", config)
+    method = _get(norm_cfg, "method", "percentile")
+    if _get(config, "normalize", method != "none") and method != "none":
+        processed_vol = normalize_intensity(
+            processed_vol,
+            method=method,
+            p_low=float(_get(norm_cfg, "percentile_low", 0.5)),
+            p_high=float(_get(norm_cfg, "percentile_high", 99.5)),
+        )
+        target_range = _get(norm_cfg, "target_range", (0.0, 1.0))
+        if method == "percentile" and tuple(target_range) != (0.0, 1.0):
+            low, high = float(target_range[0]), float(target_range[1])
+            processed_vol = processed_vol * (high - low) + low
+
+    output_cfg = _get(config, "output", {})
+    image_size = _get(output_cfg, "image_size", _get(config, "image_size", None))
+    if image_size is not None:
+        processed_vol = resize_volume(processed_vol, image_size)
         
-    return processed_vol
+    return processed_vol.astype(np.float32, copy=False)

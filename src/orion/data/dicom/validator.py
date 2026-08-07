@@ -46,12 +46,12 @@ def validate_series_consistency(slices: List[pydicom.FileDataset]) -> Tuple[bool
             
         locs = [get_slice_location(ds) for ds in slices]
         # Calculate diffs between consecutive slices
-        diffs = np.diff(locs)
+        diffs = np.diff(np.sort(locs))
         
         if len(diffs) > 0:
-            median_spacing = np.median(diffs)
+            median_spacing = np.median(np.abs(diffs))
             # If any gap is > 1.5x the median spacing, it suggests a missing slice
-            if np.any(np.abs(diffs) > 1.5 * np.abs(median_spacing)):
+            if median_spacing > 1e-6 and np.any(np.abs(diffs) > 1.5 * median_spacing):
                 errors.append("Large gap between slices detected; possible missing slice.")
                 
     return len(errors) == 0, errors
