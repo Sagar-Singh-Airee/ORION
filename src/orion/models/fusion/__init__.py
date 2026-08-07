@@ -1,5 +1,7 @@
-"""
-Multimodal Fusion
+"""Multimodal fusion modules."""
+from .bilinear_fusion import BilinearFusion
+from .cross_attention import CrossAttentionFusion
+from .early_fusion import EarlyFusion
+from .gated_fusion import GatedFusion
 
-Modules that combine representations from different modalities (e.g., Image and Text).
-"""
+__all__ = ["BilinearFusion", "CrossAttentionFusion", "EarlyFusion", "GatedFusion"]

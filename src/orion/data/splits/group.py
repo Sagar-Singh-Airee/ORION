@@ -18,7 +18,9 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     
-from loguru import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 def get_group_kfold_splits(
     X: np.ndarray, 
@@ -43,7 +45,12 @@ def get_group_kfold_splits(
     """
     if not SKLEARN_AVAILABLE:
         raise ImportError("scikit-learn is required for advanced cross-validation splitting.")
-        
+    if stratified and np.asarray(y).ndim == 2:
+        # scikit-learn's StratifiedGroupKFold is single-target. Use our iterative
+        # multilabel allocator instead of flattening labels (which loses findings).
+        from .stratified import iterative_group_kfold
+        return iterative_group_kfold(np.asarray(y), np.asarray(groups), n_splits=n_splits)
+
     if stratified:
         logger.info(f"Using StratifiedGroupKFold with {n_splits} splits.")
         cv = StratifiedGroupKFold(n_splits=n_splits)

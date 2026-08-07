@@ -9,6 +9,14 @@ project:
   deterministic: false          # true only for the final submission-locking run
   output_dir: /kaggle/working/orion_runs   # override per-platform via CLI dotlist
 
+paths:
+  data_dir: ${data.root}
+  output_dir: ${project.output_dir}
+
+labels:
+  names: [acl, mcl, medial_meniscus, lateral_meniscus, medial_oa, lateral_oa, pf_oa, effusion, synovitis, bakers_cyst, contusion, fracture]
+  num_classes: 12
+
 data:
   root: /kaggle/input/rsna-2026-knee-abnormality-detection
   cache_dir: /kaggle/working/orion_cache
@@ -17,6 +25,25 @@ data:
   num_workers: 2                # Kaggle/Colab CPU is the bottleneck, not GPU — keep low
   pin_memory: true
   persistent_workers: true
+  metadata_csv: train.csv
+  image_dir: train_images
+  preprocessing:
+    apply_voi_lut: true
+    fix_photometric_interpretation: true
+    normalization:
+      method: percentile
+      percentile_low: 0.5
+      percentile_high: 99.5
+      target_range: [0.0, 1.0]
+    slice_selection:
+      strategy: uniform
+      num_slices: ${data.num_slices}
+    output:
+      image_size: [${data.image_size}, ${data.image_size}]
+    cache:
+      enabled: true
+      backend: numpy
+      dir: ${data.cache_dir}/preprocessed
 
 model:
   backbone:
@@ -30,6 +57,19 @@ model:
   fusion:
     name: gated_fusion
   num_classes: 12
+  vision_backbone:
+    name: resnet50_scratch
+    pretrained: false
+    in_channels: 1
+    drop_path_rate: 0.0
+  neck:
+    type: slice_attention
+    hidden_dim: 256
+    dropout: 0.0
+  head:
+    hidden_dims: [512]
+    dropout: 0.3
+    activation: gelu
 
 training:
   epochs: 30
@@ -56,6 +96,18 @@ training:
     metric: macro_auc_roc
     mode: max
     keep_last: 2
+  max_epochs: ${training.epochs}
+  gradient_accumulation_steps: ${training.grad_accum_steps}
+  gradient_clip_val: ${training.grad_clip_norm}
+  mixed_precision: ${training.amp}
+  early_stopping_patience: 8
+
+optimizer: ${training.optimizer}
+
+scheduler:
+  name: cosine_with_warmup
+  warmup_epochs: ${training.scheduler.warmup_epochs}
+  min_lr: 1.0e-7
 
 cv:
   n_folds: 5

@@ -101,6 +101,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        self.out_channels = 512 * block.expansion
         
         # We don't include the final FC layer because this is just a backbone.
         # It should return spatial feature maps.

@@ -50,7 +50,7 @@ class AttentionPool(nn.Module):
         # If input is [B, Slices, C, H, W] -> reshape to [B, Slices*H*W, C]
         if x.dim() == 5:
             B, S, C, H, W = x.shape
-            x = x.view(B, S * H * W, C)
+            x = x.permute(0, 1, 3, 4, 2).reshape(B, S * H * W, C)
         elif x.dim() == 4:
             # e.g., [B, C, H, W] single image -> [B, H*W, C]
             B, C, H, W = x.shape
@@ -79,10 +79,15 @@ class AttentionPool(nn.Module):
         if mask is not None:
             # For 5D input, we need to expand the slice mask [B, S] to [B, S*H*W]
             if mask.size(1) != N:
+                if "H" not in locals():
+                    raise ValueError("Mask length must match token count for non-spatial input")
                 mask = mask.unsqueeze(-1).expand(-1, -1, H * W).reshape(B, -1)
                 
             # Set padded elements to a very large negative number so softmax -> 0
-            scores = scores.masked_fill(~mask, -1e9)
+            mask = mask.to(dtype=torch.bool, device=scores.device)
+            if not mask.any(dim=1).all():
+                raise ValueError("Every bag must contain at least one valid token")
+            scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
             
         # 4. Softmax to get probabilities (weights sum to 1)
         weights = torch.softmax(scores, dim=-1)  # [B, N]

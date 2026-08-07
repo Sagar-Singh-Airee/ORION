@@ -50,3 +50,13 @@ class Registry:
 
     def names(self) -> list[str]:
         return sorted(self._store)
+
+
+# Process-wide component registries. Keeping them here avoids circular imports
+# between model modules while still making experiment YAML fully declarative.
+BACKBONES = Registry("backbone")
+NECKS = Registry("neck")
+FUSION = Registry("fusion")
+HEADS = Registry("head")
+LOSSES = Registry("loss")
+DATASETS = Registry("dataset")

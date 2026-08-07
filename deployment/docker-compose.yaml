@@ -1,0 +1,10 @@
+services:
+  orion-api:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ${ORION_DATA_DIR:?Set_ORION_DATA_DIR}:/data:ro
+      - ${ORION_MODEL_DIR:?Set_ORION_MODEL_DIR}:/models:ro

@@ -25,7 +25,7 @@ def _resolve_path(path_like: str | Path, *, relative_to: Path | None = None) -> 
         return path.resolve()
     if relative_to is not None:
         candidate = (relative_to / path).resolve()
-        if candidate.exists() or candidate.suffix:
+        if candidate.exists() or candidate.with_suffix(".yaml").exists():
             return candidate
     return (CONFIG_ROOT / path).resolve()
 

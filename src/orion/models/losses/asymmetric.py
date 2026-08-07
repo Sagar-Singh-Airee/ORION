@@ -42,6 +42,8 @@ class AsymmetricLoss(nn.Module):
             x: Raw logits (before sigmoid) [B, C]
             y: Binary targets [B, C]
         """
+        known = y >= 0
+        y = y.clamp(0, 1)
         # Calculating Probabilities
         x_sigmoid = torch.sigmoid(x)
         
@@ -69,4 +71,4 @@ class AsymmetricLoss(nn.Module):
         loss = loss_pos + loss_neg
         
         # Return negative sum (since log probabilities are negative)
-        return -loss.mean()
+        return -(loss * known).sum() / known.sum().clamp_min(1)

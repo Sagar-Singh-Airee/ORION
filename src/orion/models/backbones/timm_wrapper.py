@@ -67,3 +67,16 @@ class TimmBackbone(nn.Module):
             ViTs: [B, NumTokens, Channels]
         """
         return self.model(x)
+
+
+_TIMM_NAME_MAP = {
+    "swin_v2_base": "swinv2_base_window12to16_192to256",
+    "convnext_large": "convnext_large",
+    "efficientnet_b4": "tf_efficientnet_b4",
+    "maxvit_base": "maxvit_base_tf_224",
+}
+
+
+def build_timm_backbone(name: str, **kwargs) -> TimmBackbone:
+    """Map human-readable experiment names to stable timm model identifiers."""
+    return TimmBackbone(name=_TIMM_NAME_MAP.get(name, name), **kwargs)

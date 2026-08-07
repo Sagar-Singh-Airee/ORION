@@ -1,6 +1,5 @@
-"""
-Necks
+"""Feature aggregation layers."""
+from .attention_pool import AttentionPool
+from .slice_aggregator import MaskedMeanAggregator, SliceAttentionAggregator
 
-Modules that connect the backbone to the head.
-Includes pooling layers (GEM, Attention) and slice aggregators for Multi-Instance Learning.
-"""
+__all__ = ["AttentionPool", "MaskedMeanAggregator", "SliceAttentionAggregator"]

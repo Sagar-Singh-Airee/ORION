@@ -1,105 +1,91 @@
-"""
-Transform Factory
+"""Configurable, medically conservative 2-D augmentation factories."""
+from __future__ import annotations
 
-WHY it exists:
-Instead of hardcoding complex augmentation pipelines, this factory reads the
-`augmentation.yaml` configuration and dynamically builds the Albumentations pipeline.
-This allows us to experiment with different augmentations without changing code.
-"""
+from collections.abc import Mapping
+from typing import Any, Callable
 
-from typing import Dict, Any, Callable
-from loguru import logger
-from omegaconf import DictConfig
+import numpy as np
 
 try:
     import albumentations as A
-    from albumentations.pytorch import ToTensorV2
     ALBUMENTATIONS_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover
+    A = None  # type: ignore[assignment]
     ALBUMENTATIONS_AVAILABLE = False
 
 
-def create_train_transforms(config: DictConfig) -> Callable:
-    """
-    Creates the training data augmentation pipeline based on config.
-    """
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, Mapping):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _section(config: Any) -> Any:
+    data = _get(config, "data", config)
+    return _get(data, "augmentation", data)
+
+
+def _image_size(config: Any) -> tuple[int, int]:
+    data = _get(config, "data", config)
+    preprocessing = _get(data, "preprocessing", data)
+    output = _get(preprocessing, "output", preprocessing)
+    size = _get(output, "image_size", _get(data, "image_size", (384, 384)))
+    return int(size[0]), int(size[1])
+
+
+def _enabled(section: Any, name: str) -> Any | None:
+    value = _get(section, name, {})
+    return value if _get(value, "enabled", False) else None
+
+
+def _identity(image: np.ndarray | None = None, **_: Any) -> dict[str, np.ndarray | None]:
+    return {"image": image}
+
+
+def create_train_transforms(config: Any) -> Callable[..., dict[str, Any]]:
+    """Build an Albumentations pipeline; no silent tensor conversion occurs here."""
     if not ALBUMENTATIONS_AVAILABLE:
-        logger.error("Albumentations not installed. Using fallback Identity transform.")
-        return lambda image=None, **kwargs: {"image": image}
-        
-    aug_cfg = config.data.augmentation
-    if not aug_cfg.get("train", True):
-        return create_val_transforms(config)
-        
-    img_size = config.data.preprocessing.image_size[0]
-    transforms = []
-    
-    # --- Spatial Augmentations ---
-    spatial = aug_cfg.get("spatial", {})
-    if spatial.get("hflip", {}).get("enabled", False):
-        transforms.append(A.HorizontalFlip(p=spatial.hflip.p))
-        
-    if spatial.get("vflip", {}).get("enabled", False):
-        transforms.append(A.VerticalFlip(p=spatial.vflip.p))
-        
-    if spatial.get("rotation", {}).get("enabled", False):
-        transforms.append(A.Rotate(limit=spatial.rotation.limit, p=spatial.rotation.p))
-        
-    if spatial.get("random_crop", {}).get("enabled", False):
+        return _identity
+    aug = _section(config)
+    height, width = _image_size(config)
+    spatial = _get(aug, "spatial", {})
+    intensity = _get(aug, "intensity", {})
+    transforms: list[Any] = []
+    if option := _enabled(spatial, "hflip"):
+        transforms.append(A.HorizontalFlip(p=float(_get(option, "p", 0.5))))
+    if option := _enabled(spatial, "vflip"):
+        transforms.append(A.VerticalFlip(p=float(_get(option, "p", 0.5))))
+    if option := _enabled(spatial, "rotation"):
+        transforms.append(A.Rotate(limit=float(_get(option, "limit", 10)), p=float(_get(option, "p", 0.5))))
+    if option := _enabled(spatial, "scale"):
+        transforms.append(A.RandomScale(scale_limit=float(_get(option, "scale_limit", 0.1)), p=float(_get(option, "p", 0.3))))
+    crop = _enabled(spatial, "random_crop")
+    if crop:
         transforms.append(
             A.RandomResizedCrop(
-                height=img_size,
-                width=img_size,
-                scale=list(spatial.random_crop.scale),
-                ratio=list(spatial.random_crop.ratio),
-                p=spatial.random_crop.p
+                height=height,
+                width=width,
+                scale=tuple(_get(crop, "scale", (0.9, 1.0))),
+                ratio=tuple(_get(crop, "ratio", (0.95, 1.05))),
+                p=float(_get(crop, "p", 1.0)),
             )
         )
     else:
-        transforms.append(A.Resize(height=img_size, width=img_size))
-
-    # --- Intensity Augmentations ---
-    intensity = aug_cfg.get("intensity", {})
-    if intensity.get("brightness_contrast", {}).get("enabled", False):
-        transforms.append(
-            A.RandomBrightnessContrast(
-                brightness_limit=intensity.brightness_contrast.brightness_limit,
-                contrast_limit=intensity.brightness_contrast.contrast_limit,
-                p=intensity.brightness_contrast.p
-            )
-        )
-        
-    if intensity.get("gaussian_noise", {}).get("enabled", False):
-        transforms.append(A.GaussNoise(var_limit=list(intensity.gaussian_noise.var_limit), p=intensity.gaussian_noise.p))
-        
-    if intensity.get("coarse_dropout", {}).get("enabled", False):
-        transforms.append(
-            A.CoarseDropout(
-                max_holes=intensity.coarse_dropout.max_holes,
-                max_height=intensity.coarse_dropout.max_height,
-                max_width=intensity.coarse_dropout.max_width,
-                p=intensity.coarse_dropout.p
-            )
-        )
-
-    # Convert to PyTorch Tensor
-    transforms.append(ToTensorV2())
-    
-    return A.Compose(transforms, additional_targets={})
+        transforms.append(A.Resize(height=height, width=width))
+    if option := _enabled(intensity, "brightness_contrast"):
+        transforms.append(A.RandomBrightnessContrast(brightness_limit=float(_get(option, "brightness_limit", 0.15)), contrast_limit=float(_get(option, "contrast_limit", 0.15)), p=float(_get(option, "p", 0.5))))
+    if option := _enabled(intensity, "gaussian_noise"):
+        transforms.append(A.GaussNoise(var_limit=tuple(_get(option, "var_limit", (5.0, 20.0))), p=float(_get(option, "p", 0.3))))
+    if option := _enabled(intensity, "gaussian_blur"):
+        transforms.append(A.GaussianBlur(blur_limit=tuple(_get(option, "blur_limit", (3, 5))), p=float(_get(option, "p", 0.2))))
+    if option := _enabled(intensity, "gamma"):
+        transforms.append(A.RandomGamma(gamma_limit=tuple(_get(option, "gamma_limit", (80, 120))), p=float(_get(option, "p", 0.2))))
+    # Replay keeps spatial/intensity choices coherent across the slices in one MRI.
+    return A.ReplayCompose(transforms)
 
 
-def create_val_transforms(config: DictConfig) -> Callable:
-    """
-    Creates the validation data pipeline (resize and ToTensor only).
-    """
+def create_val_transforms(config: Any) -> Callable[..., dict[str, Any]]:
     if not ALBUMENTATIONS_AVAILABLE:
-        return lambda image=None, **kwargs: {"image": image}
-        
-    img_size = config.data.preprocessing.image_size[0]
-    
-    transforms = [
-        A.Resize(height=img_size, width=img_size),
-        ToTensorV2()
-    ]
-    
-    return A.Compose(transforms)
+        return _identity
+    height, width = _image_size(config)
+    return A.Compose([A.Resize(height=height, width=width)])
