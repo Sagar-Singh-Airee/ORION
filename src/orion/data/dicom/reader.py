@@ -1,132 +1,166 @@
-"""
-DICOM Reader Utility
+"""DICOM reading: discover series within a study, order slices correctly, extract the
+metadata that mri/sequences.py needs to tell T1 apart from T2/PD/STIR, and mri/anatomy.py
+needs to tell sagittal apart from coronal/axial.
 
-WHY it exists:
-A single MRI sequence consists of multiple 2D DICOM files (slices).
-Reading them requires:
-1. Identifying all files for a given sequence/series.
-2. Sorting them in physical space (not just alphabetically by filename).
-3. Extracting the raw pixel arrays and stacking them into a 3D volume.
+The one bug this file exists to prevent: sorting slices by `InstanceNumber` alone.
+InstanceNumber is assigned by the scanner/PACS and is not guaranteed to correlate with
+spatial position — especially across the 16-institution, multi-vendor set this competition
+draws from. Correct ordering is the signed projection of each slice's
+ImagePositionPatient onto the series' normal vector (cross product of the row/column
+direction cosines from ImageOrientationPatient). InstanceNumber is kept only as a
+tie-breaker / fallback when ImagePositionPatient is missing.
 """
+from __future__ import annotations
 
-import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
 import pydicom
-from loguru import logger
+from pydicom.errors import InvalidDicomError
 
-def load_dicom_file(filepath: str | Path) -> Optional[pydicom.FileDataset]:
-    """
-    Safely loads a single DICOM file.
-    Returns None if the file is invalid or not a DICOM.
-    """
+
+@dataclass
+class SeriesMetadata:
+    study_uid: str
+    series_uid: str
+    series_description: str
+    modality: str
+    rows: int
+    columns: int
+    pixel_spacing: tuple[float, float] | None
+    slice_thickness: float | None
+    image_orientation_patient: tuple[float, ...] | None  # 6 direction cosines
+    repetition_time: float | None   # TR, ms — for sequence ID
+    echo_time: float | None         # TE, ms — for sequence ID
+    inversion_time: float | None    # TI, ms — distinguishes STIR
+    num_slices: int
+
+
+@dataclass
+class DicomSeries:
+    metadata: SeriesMetadata
+    file_paths: list[Path]          # sorted to match pixel_array order
+    pixel_array: np.ndarray         # (num_slices, H, W), rescaled (slope/intercept applied)
+    slice_positions: np.ndarray     # (num_slices,) signed projection used for sort order
+
+
+def _safe_float(value, default=None):
     try:
-        # stop_before_pixels=False because we need the image data
-        return pydicom.dcmread(str(filepath), stop_before_pixels=False)
-    except pydicom.errors.InvalidDicomError:
-        logger.warning(f"Invalid DICOM file: {filepath}")
-        return None
-    except Exception as e:
-        logger.error(f"Error reading {filepath}: {e}")
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _read_one(path: Path) -> pydicom.Dataset | None:
+    try:
+        return pydicom.dcmread(str(path), force=True)
+    except (InvalidDicomError, OSError):
         return None
 
 
-def get_series_files(study_dir: str | Path, series_uid: str) -> List[Path]:
-    """
-    Given a study directory, find all DICOM files belonging to a specific SeriesInstanceUID.
-    (In the RSNA dataset, directories might already be organized by series).
-    """
+def discover_series(study_dir: str | Path) -> dict[str, list[Path]]:
+    """Walk a study directory and group all readable DICOM files by SeriesInstanceUID."""
     study_dir = Path(study_dir)
-    series_files = []
-    
-    # Iterate through all files in the directory
-    for root, _, files in os.walk(study_dir):
-        for file in files:
-            filepath = Path(root) / file
-            # Quick check without loading full pixels
-            try:
-                ds = pydicom.dcmread(str(filepath), stop_before_pixels=True)
-                if ds.SeriesInstanceUID == series_uid:
-                    series_files.append(filepath)
-            except Exception:
-                continue
-                
-    return series_files
+    series_map: dict[str, list[Path]] = {}
+
+    for path in study_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        ds = _read_one(path)
+        if ds is None or "SeriesInstanceUID" not in ds:
+            continue
+        series_map.setdefault(ds.SeriesInstanceUID, []).append(path)
+
+    return series_map
 
 
-def sort_slices(dicom_slices: List[pydicom.FileDataset]) -> List[pydicom.FileDataset]:
-    """
-    Sorts DICOM slices based on their physical location in 3D space.
-    
-    WHY: Filenames are often arbitrary (e.g., 1.dcm, 2.dcm might not be adjacent slices).
-    We must use the ImagePositionPatient and ImageOrientationPatient tags to
-    compute the slice location along the normal vector of the image plane.
-    """
-    if not dicom_slices:
-        return []
+def _slice_normal(iop: list[float]) -> np.ndarray:
+    row_cosine = np.array(iop[0:3])
+    col_cosine = np.array(iop[3:6])
+    return np.cross(row_cosine, col_cosine)
 
-    # Ensure all slices have the required tags
-    valid_slices = []
-    for dcm in dicom_slices:
-        if hasattr(dcm, "ImagePositionPatient") and hasattr(dcm, "ImageOrientationPatient"):
-            valid_slices.append(dcm)
-        else:
-            # Fallback: Try InstanceNumber if spatial metadata is missing
-            if hasattr(dcm, "InstanceNumber"):
-                valid_slices.append(dcm)
 
-    if not valid_slices:
-        logger.error("No valid spatial tags or InstanceNumbers found in slices.")
-        return dicom_slices
+def load_series(series_uid: str, file_paths: list[Path]) -> DicomSeries | None:
+    """Load, correctly order, and rescale one DICOM series into a (S, H, W) volume."""
+    datasets = []
+    for p in file_paths:
+        ds = _read_one(p)
+        if ds is not None and "PixelData" in ds:
+            datasets.append((p, ds))
 
-    # If we have spatial tags, calculate projection along the slice normal
-    if hasattr(valid_slices[0], "ImagePositionPatient") and hasattr(valid_slices[0], "ImageOrientationPatient"):
-        # The orientation is 6 values: (x,y,z) for row vector, (x,y,z) for col vector
-        # The cross product gives the normal vector to the plane
-        def get_slice_location(dcm: pydicom.FileDataset) -> float:
-            pos = np.array(dcm.ImagePositionPatient, dtype=float)
-            ori = np.array(dcm.ImageOrientationPatient, dtype=float)
-            row_vec = ori[0:3]
-            col_vec = ori[3:6]
-            normal_vec = np.cross(row_vec, col_vec)
-            # Project position onto normal vector
-            return np.dot(pos, normal_vec) # type: ignore
+    if not datasets:
+        return None
 
-        sorted_slices = sorted(valid_slices, key=get_slice_location)
+    ref = datasets[0][1]
+    iop = getattr(ref, "ImageOrientationPatient", None)
+
+    if iop is not None:
+        normal = _slice_normal([float(v) for v in iop])
+        keyed = []
+        for p, ds in datasets:
+            ipp = getattr(ds, "ImagePositionPatient", None)
+            if ipp is not None:
+                pos = float(np.dot(normal, [float(v) for v in ipp]))
+            else:
+                pos = float(getattr(ds, "InstanceNumber", 0))
+            keyed.append((pos, p, ds))
+        keyed.sort(key=lambda t: t[0])
     else:
-        # Fallback to InstanceNumber
-        sorted_slices = sorted(valid_slices, key=lambda x: int(x.InstanceNumber)) # type: ignore
+        keyed = sorted(
+            ((float(getattr(ds, "InstanceNumber", i)), p, ds) for i, (p, ds) in enumerate(datasets)),
+            key=lambda t: t[0],
+        )
 
-    return sorted_slices
+    positions = np.array([k[0] for k in keyed], dtype=np.float32)
+    ordered_paths = [k[1] for k in keyed]
+    ordered_ds = [k[2] for k in keyed]
+
+    frames = []
+    for ds in ordered_ds:
+        arr = ds.pixel_array.astype(np.float32)
+        slope = _safe_float(getattr(ds, "RescaleSlope", None), 1.0)
+        intercept = _safe_float(getattr(ds, "RescaleIntercept", None), 0.0)
+        frames.append(arr * slope + intercept)
+
+    shapes = {f.shape for f in frames}
+    if len(shapes) > 1:
+        # Mixed in-plane shapes within one series — genuine data-quality issue, drop the
+        # series rather than silently resizing (resizing belongs in preprocessor.py, with
+        # a logged decision, not hidden here).
+        return None
+
+    pixel_array = np.stack(frames, axis=0)
+
+    meta = SeriesMetadata(
+        study_uid=str(getattr(ref, "StudyInstanceUID", "")),
+        series_uid=series_uid,
+        series_description=str(getattr(ref, "SeriesDescription", "")),
+        modality=str(getattr(ref, "Modality", "")),
+        rows=int(ref.Rows),
+        columns=int(ref.Columns),
+        pixel_spacing=tuple(float(v) for v in ref.PixelSpacing) if "PixelSpacing" in ref else None,
+        slice_thickness=_safe_float(getattr(ref, "SliceThickness", None)),
+        image_orientation_patient=tuple(float(v) for v in iop) if iop is not None else None,
+        repetition_time=_safe_float(getattr(ref, "RepetitionTime", None)),
+        echo_time=_safe_float(getattr(ref, "EchoTime", None)),
+        inversion_time=_safe_float(getattr(ref, "InversionTime", None)),
+        num_slices=len(ordered_ds),
+    )
+
+    return DicomSeries(
+        metadata=meta, file_paths=ordered_paths, pixel_array=pixel_array, slice_positions=positions,
+    )
 
 
-def load_series_volume(file_paths: List[Path]) -> Tuple[np.ndarray, List[pydicom.FileDataset]]:
-    """
-    Loads a list of DICOM paths, sorts them, and extracts the 3D volume.
-    
-    Returns:
-        volume: NumPy array of shape (Slices, Height, Width)
-        slices: List of the loaded, sorted pydicom datasets
-    """
-    dicom_slices = []
-    for fp in file_paths:
-        ds = load_dicom_file(fp)
-        if ds is not None:
-            dicom_slices.append(ds)
-
-    sorted_slices = sort_slices(dicom_slices)
-    
-    # Extract pixel arrays
-    # Note: Using ds.pixel_array which relies on pydicom pixel handlers
-    arrays = []
-    for ds in sorted_slices:
-        if hasattr(ds, "pixel_array"):
-            arrays.append(ds.pixel_array)
-            
-    if not arrays:
-        raise ValueError("No pixel data found in the provided files.")
-        
-    volume = np.stack(arrays, axis=0)
-    return volume, sorted_slices
+def load_study(study_dir: str | Path) -> list[DicomSeries]:
+    """All series for one study, loaded and ordered. Series that fail to load
+    (unreadable, mixed shapes) are dropped, not raised — a single bad series should not
+    take down a whole study; log at the caller if you need visibility into drop rate."""
+    series_map = discover_series(study_dir)
+    out = []
+    for series_uid, paths in series_map.items():
+        series = load_series(series_uid, paths)
+        if series is not None:
+            out.append(series)
+    return out

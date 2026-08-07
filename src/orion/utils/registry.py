@@ -1,66 +1,48 @@
-"""
-Registry Pattern Utility
+"""Generic registry so every component (backbone, loss, fusion, dataset...) is
+selectable by a string name from YAML config, without central if/elif chains.
 
-WHY it exists:
-Deep learning codebases often become a tangled mess of `if/elif` statements:
-  if model_name == "resnet50": ...
-  elif model_name == "swin": ...
-  
-A Registry pattern allows us to decouple definition from instantiation.
-Components (models, losses, datasets) register themselves using decorators.
-The config file simply specifies the string name, and the factory instantiates it.
-"""
+Usage:
+    BACKBONES = Registry("backbone")
 
-from typing import Dict, Any, Type, Callable
-from loguru import logger
+    @BACKBONES.register("convnext_v2_base")
+    class ConvNeXtV2Base(nn.Module): ...
+
+    model_cls = BACKBONES.get(cfg.model.backbone.name)
+    model = model_cls(**cfg.model.backbone.kwargs)
+"""
+from __future__ import annotations
+
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
+
 
 class Registry:
-    """
-    A simple registry to map string names to classes or functions.
-    """
-    def __init__(self, name: str):
-        self.name = name
-        self._registry: Dict[str, Any] = {}
+    def __init__(self, kind: str):
+        self.kind = kind
+        self._store: dict[str, type] = {}
 
-    def register(self, name: str | None = None) -> Callable:
-        """
-        Decorator to register a class or function.
-        If name is not provided, uses the class/function name.
-        """
-        def decorator(obj: Any) -> Any:
-            registry_name = name if name is not None else obj.__name__
-            if registry_name in self._registry:
-                logger.warning(f"Overwriting existing registry entry '{registry_name}' in {self.name}")
-            self._registry[registry_name] = obj
-            return obj
-        return decorator
+    def register(self, name: str | None = None) -> Callable[[type[T]], type[T]]:
+        def _decorator(cls: type[T]) -> type[T]:
+            key = name or cls.__name__
+            if key in self._store:
+                raise KeyError(f"{self.kind} '{key}' already registered "
+                                f"(existing: {self._store[key]}, new: {cls})")
+            self._store[key] = cls
+            return cls
+        return _decorator
 
-    def get(self, name: str) -> Any:
-        """Retrieves an object from the registry by name."""
-        if name not in self._registry:
-            raise KeyError(f"'{name}' not found in registry '{self.name}'. Available: {list(self._registry.keys())}")
-        return self._registry[name]
+    def get(self, name: str) -> type:
+        if name not in self._store:
+            available = ", ".join(sorted(self._store)) or "<empty>"
+            raise KeyError(f"Unknown {self.kind} '{name}'. Available: {available}")
+        return self._store[name]
 
-    def build(self, name: str, **kwargs: Any) -> Any:
-        """Builds an instance of the registered class with provided kwargs."""
-        obj_cls = self.get(name)
-        return obj_cls(**kwargs)
+    def build(self, name: str, *args, **kwargs):
+        return self.get(name)(*args, **kwargs)
 
-    def contains(self, name: str) -> bool:
-        return name in self._registry
+    def __contains__(self, name: str) -> bool:
+        return name in self._store
 
-    def __str__(self) -> str:
-        return f"Registry({self.name}): {list(self._registry.keys())}"
-
-
-# Global registries
-MODELS = Registry("models")
-BACKBONES = Registry("backbones")
-NECKS = Registry("necks")
-HEADS = Registry("heads")
-FUSION = Registry("fusion")
-LOSSES = Registry("losses")
-DATASETS = Registry("datasets")
-TRANSFORMS = Registry("transforms")
-OPTIMIZERS = Registry("optimizers")
-SCHEDULERS = Registry("schedulers")
+    def names(self) -> list[str]:
+        return sorted(self._store)

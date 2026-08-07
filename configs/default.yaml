@@ -1,170 +1,71 @@
-# ORION Default Base Configuration
-# All experiment configs inherit from this.
-# Override specific keys in experiment/*.yaml
+# Base config — every experiment/*.yaml merges over this.
+# Defaults assume a single Kaggle/Colab GPU (T4 16GB / P100 16GB / A100 40GB single-instance):
+# no DDP, AMP on, small-to-moderate batch size with gradient accumulation to reach an
+# effective batch size, aggressive disk caching so re-running a session doesn't re-decode DICOM.
 
-# ─── Paths ────────────────────────────────────────────────────────────────────
-paths:
-  data_dir:   ${oc.env:DATA_DIR,/data/rsna-knee-2026}
-  cache_dir:  ${oc.env:CACHE_DIR,/tmp/orion-cache}
-  runs_dir:   ${oc.env:RUNS_DIR,./runs}
-  output_dir: ${paths.runs_dir}/${experiment.name}
+project:
+  name: orion-rsna-knee-2026
+  seed: 42
+  deterministic: false          # true only for the final submission-locking run
+  output_dir: /kaggle/working/orion_runs   # override per-platform via CLI dotlist
 
-# ─── Experiment Identity ──────────────────────────────────────────────────────
-experiment:
-  name: "baseline"
-  seed: ${oc.env:GLOBAL_SEED,42}
-  tags: []
-  notes: ""
+data:
+  root: /kaggle/input/rsna-2026-knee-abnormality-detection
+  cache_dir: /kaggle/working/orion_cache
+  image_size: 384
+  num_slices: 24                # fixed sampling budget per study (Strategy A/C hybrid)
+  num_workers: 2                # Kaggle/Colab CPU is the bottleneck, not GPU — keep low
+  pin_memory: true
+  persistent_workers: true
 
-# ─── Reproducibility ─────────────────────────────────────────────────────────
-reproducibility:
-  deterministic: true
-  benchmark: false     # Set true only when input sizes are constant
-  seed: ${experiment.seed}
-
-# ─── Labels ──────────────────────────────────────────────────────────────────
-labels:
-  names:
-    - "ACL"
-    - "MCL"
-    - "Medial Meniscus"
-    - "Lateral Meniscus"
-    - "Medial OA"
-    - "Lateral OA"
-    - "PF OA"
-    - "Effusion"
-    - "Synovitis"
-    - "Baker's"
-    - "Contusion"
-    - "Fracture"
+model:
+  backbone:
+    name: swin_v2_base
+    pretrained: true
+    kwargs: {}
+  text_encoder:
+    name: xlm_roberta_base
+    pretrained: true
+    max_length: 256
+  fusion:
+    name: gated_fusion
   num_classes: 12
 
-# ─── Data ─────────────────────────────────────────────────────────────────────
-data:
-  preprocessing:
-    image_size: [256, 256]       # H × W after resize
-    num_slices: 24               # Slices to sample per series
-    normalize: true
-    apply_voi_lut: true
-    fix_photometric: true        # Handle MONOCHROME1 inversion
-
-  augmentation:
-    train: true
-    val: false
-    test: false
-
-  splits:
-    strategy: "group_kfold"      # group by patient to prevent leakage
-    n_folds: 5
-    fold: 0
-    val_fold: 0
-
-  loader:
-    batch_size: 16
-    num_workers: 4
-    pin_memory: true
-    drop_last: true
-    prefetch_factor: 2
-
-  multimodal: false              # Set true to include text reports
-  use_weak_labels: true          # Use NLP-extracted labels from reports
-
-# ─── Model ────────────────────────────────────────────────────────────────────
-model:
-  vision_backbone:
-    name: "resnet50"
-    pretrained: true
-    freeze_until_epoch: 0        # 0 = never freeze; N = freeze for N epochs
-    drop_path_rate: 0.1
-
-  text_encoder: null             # null = vision only; set to "xlm_roberta" etc.
-
-  neck:
-    type: "attention_pool"       # gem | attention_pool | avg_pool
-    hidden_dim: 512
-
-  fusion:
-    type: "none"                 # none | early | late | cross_attention | gated
-    hidden_dim: 512
-
-  head:
-    hidden_dims: [512, 256]
-    dropout: 0.5
-    activation: "gelu"
-
+training:
+  epochs: 30
+  batch_size: 4                 # per-step; combine with grad_accum for effective batch
+  grad_accum_steps: 8           # effective batch size = 32
+  amp: true                     # mandatory on T4/P100 — fp32 will not fit reasonable batches
+  amp_dtype: fp16               # bf16 only on A100+; T4/P100 lack bf16 tensor cores
+  grad_clip_norm: 1.0
+  optimizer:
+    name: adamw
+    lr: 2.0e-4
+    weight_decay: 0.01
+  scheduler:
+    name: cosine_warmup
+    warmup_epochs: 2
+  loss:
+    name: asymmetric
+    gamma_pos: 0
+    gamma_neg: 4
   ema:
     enabled: true
-    decay: 0.9998
+    decay: 0.999
+  checkpoint:
+    metric: macro_auc_roc
+    mode: max
+    keep_last: 2
 
-# ─── Loss ─────────────────────────────────────────────────────────────────────
-loss:
-  primary:
-    name: "asymmetric"
-    gamma_pos: 0.0
-    gamma_neg: 4.0
-    clip: 0.05
-    weight: 1.0
-  auxiliary: null                # Optional auxiliary losses
+cv:
+  n_folds: 5
+  strategy: group_kfold         # grouped by patient/institution — see data/splits/leakage.py
 
-# ─── Optimizer ────────────────────────────────────────────────────────────────
-optimizer:
-  name: "adamw"
-  lr: 1.0e-4
-  weight_decay: 1.0e-2
-  betas: [0.9, 0.999]
-  eps: 1.0e-8
-
-  # Layer-wise learning rate decay (for transformers)
-  layer_decay: null              # e.g. 0.75 for ViT
-
-  # Differential LRs: backbone gets lower LR
-  backbone_lr_multiplier: 0.1
-
-# ─── Scheduler ────────────────────────────────────────────────────────────────
-scheduler:
-  name: "cosine_with_warmup"
-  warmup_epochs: 5
-  min_lr: 1.0e-7
-
-# ─── Training ─────────────────────────────────────────────────────────────────
-training:
-  max_epochs: 50
-  gradient_clip_val: 1.0
-  gradient_accumulation_steps: 1
-  mixed_precision: true          # AMP (FP16)
-  eval_every_n_epochs: 1
-  save_top_k: 3
-  monitor_metric: "val_macro_auc"
-  monitor_mode: "max"
-  early_stopping_patience: 10
-  swa:
-    enabled: false
-    start_epoch: 40
-    anneal_epochs: 5
-
-# ─── Inference ────────────────────────────────────────────────────────────────
 inference:
-  tta:
-    enabled: true
-    n_augmentations: 4
-    strategies: ["hflip", "vflip", "rotate90", "rotate270"]
-  threshold: 0.5                 # Default; optimized per label post-training
+  tta: [identity, hflip]
+  ensemble: mean
 
-# ─── Hardware ─────────────────────────────────────────────────────────────────
-hardware:
-  accelerator: "gpu"             # cpu | gpu | mps
-  devices: 1
-  strategy: "auto"              # auto | ddp | fsdp
-  precision: "16-mixed"
-
-# ─── Logging ─────────────────────────────────────────────────────────────────
 logging:
-  wandb:
-    enabled: true
-    project: ${oc.env:WANDB_PROJECT,rsna-knee-2026}
-    entity: ${oc.env:WANDB_ENTITY,null}
-    log_frequency: 10            # Steps between metric logs
-    log_images: true             # Log Grad-CAM visualizations
-  tensorboard:
-    enabled: false
-  level: "INFO"
+  backend: wandb
+  wandb_project: rsna-knee-2026
+  log_every_n_steps: 50
