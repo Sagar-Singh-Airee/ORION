@@ -104,6 +104,13 @@ training:
 
 optimizer: ${training.optimizer}
 
+loss:
+  primary:
+    name: ${training.loss.name}
+    gamma_pos: ${training.loss.gamma_pos}
+    gamma_neg: ${training.loss.gamma_neg}
+    clip: 0.05
+
 scheduler:
   name: cosine_with_warmup
   warmup_epochs: ${training.scheduler.warmup_epochs}

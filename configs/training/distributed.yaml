@@ -1,0 +1,5 @@
+training:
+  distributed:
+    enabled: false
+    backend: nccl
+    find_unused_parameters: false

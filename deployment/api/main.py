@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 
 from .middleware import RequestContextMiddleware
 from .schemas import HealthResponse, PredictRequest, PredictResponse
@@ -32,6 +33,9 @@ def create_app(predict: PredictFunction | None = None, model_version: str | None
             raise HTTPException(status_code=500, detail="Predictor returned invalid probabilities")
         return PredictResponse(study_id=path.name, probabilities=probabilities, model_version=model_version or "unknown")
 
+    ui_dir = Path(__file__).resolve().parents[1] / "ui"
+    if ui_dir.is_dir():
+        app.mount("/", StaticFiles(directory=ui_dir, html=True), name="ui")
     return app
 
 

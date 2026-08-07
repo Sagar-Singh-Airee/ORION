@@ -1,0 +1,6 @@
+data:
+  splits:
+    group_column: patient_id
+    fold: 0
+    n_folds: 5
+    strategy: iterative_group_kfold

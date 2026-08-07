@@ -1,0 +1,17 @@
+experiment:
+  name: efficiency_track_fold0
+  tags: [efficientnet, onnx]
+
+data:
+  image_size: 256
+  num_slices: 16
+
+model:
+  vision_backbone:
+    name: efficientnet_b4
+    pretrained: true
+    in_channels: 1
+
+training:
+  batch_size: 12
+  max_epochs: 30

@@ -14,8 +14,8 @@ from ..text.tokenizer import ReportTokenizer
 from loguru import logger
 
 class MultimodalKneeDataset(KneeMRIDataset):
-    def __init__(self, config: Any, split: str = "train"):
-        super().__init__(config, split)
+    def __init__(self, config: Any, split: str = "train", transform: Any | None = None, records: list[dict[str, Any]] | None = None):
+        super().__init__(config, split, transform=transform, records=records)
         
         # Initialize text tokenizer
         text_cfg = config.model.text_encoder

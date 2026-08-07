@@ -1,0 +1,5 @@
+inference:
+  tta:
+    enabled: true
+    strategies: [identity, hflip]
+    aggregation: mean

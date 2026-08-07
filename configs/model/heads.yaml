@@ -1,0 +1,9 @@
+model:
+  neck:
+    type: slice_attention
+    hidden_dim: 256
+    dropout: 0.1
+  head:
+    hidden_dims: [512, 256]
+    dropout: 0.3
+    activation: gelu

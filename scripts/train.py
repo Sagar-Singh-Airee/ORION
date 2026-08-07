@@ -1,71 +1,53 @@
-"""
-Training Script
-
-Entry point for starting experiments.
-
-Usage:
-    python scripts/train.py --config configs/experiment/baseline_resnet50.yaml
-"""
+"""Train one leakage-safe fold in Kaggle; no training is executed by this repository itself."""
+from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
-from loguru import logger
+
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# Add src to path so we can import orion
-sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
-
-from orion.utils.config import load_config
-from orion.utils.logging import setup_logger
-from orion.utils.wandb_utils import init_wandb, finish_wandb
-from orion.utils.tensor_utils import get_device
-
-# Mock imports for the script structure
-from orion.data.datasets.knee_mri import KneeMRIDataset
-from orion.models.architectures.multimodal import ORIONMultimodalModel
-from orion.models.losses.asymmetric import AsymmetricLoss
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from orion.data.datasets import KneeMRIDataset, MultimodalKneeDataset, variable_length_collate
+from orion.data.text.label_extractor import FINDINGS
+from orion.data.transforms import create_train_transforms, create_val_transforms
+from orion.models.architectures import ORIONMultimodalModel
+from orion.models.ema import ModelEMA
+from orion.models.losses import AsymmetricLoss, FocalLoss, MaskedBCEWithLogitsLoss
 from orion.training.optimizer import create_adamw, create_sgd
+from orion.training.reproducibility import seed_everything, seeded_generator, worker_init_fn
+from orion.training.scheduler import CosineAnnealingWithWarmup
 from orion.training.trainer import Trainer
+from orion.utils.config import load_config, save_config
+from orion.utils.logging import setup_logger
 
-def main():
-    parser = argparse.ArgumentParser(description="ORION Training Script")
-    parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
-    parser.add_argument("overrides", nargs="*", help="CLI overrides (e.g. training.lr=1e-3)")
-    args = parser.parse_args()
 
-    # 1. Load Config
-    config = load_config(args.config, args.overrides)
-    
-    # 2. Setup Logging & Tracking
-    setup_logger(config, config.paths.output_dir)
-    init_wandb(config)
-    
-    device = get_device()
-    logger.info(f"Using device: {device}")
+def build_loss(config):
+    loss = config.loss.primary; name = loss.name
+    if name == "bce": return MaskedBCEWithLogitsLoss(loss.get("pos_weight"))
+    if name == "focal": return FocalLoss(loss.get("gamma", 2.0), loss.get("alpha"))
+    if name == "asymmetric": return AsymmetricLoss(loss.get("gamma_neg", 4.0), loss.get("gamma_pos", 0.0), loss.get("clip", 0.05))
+    raise ValueError(f"Unknown loss {name!r}")
 
-    # 3. Data Loaders
-    # In a real script, this uses the CrossValidation splits
-    logger.info("Initializing Datasets...")
-    train_dataset = KneeMRIDataset(config, split="train")
-    # train_loader = DataLoader(train_dataset, batch_size=config.data.loader.batch_size, ...)
-    
-    # 4. Model
-    logger.info(f"Initializing Model: {config.model.vision_backbone.name}")
-    model = ORIONMultimodalModel(config).to(device)
-    
-    # 5. Optimizer & Loss
-    optimizer = create_adamw(model, config.optimizer)
-    criterion = AsymmetricLoss(gamma_neg=config.loss.primary.gamma_neg, clip=config.loss.primary.clip)
-    
-    # 6. Trainer
-    # trainer = Trainer(...)
-    # trainer.train_epoch(0)
-    
-    logger.info("Training script initialized successfully (Mock mode).")
-    finish_wandb()
 
-if __name__ == "__main__":
-    main()
+def main() -> None:
+    parser = argparse.ArgumentParser(); parser.add_argument("--config", required=True); parser.add_argument("overrides", nargs="*")
+    args = parser.parse_args(); cfg = load_config(args.config, args.overrides)
+    output = Path(cfg.paths.output_dir) / cfg.get("experiment", {}).get("name", "orion")
+    output.mkdir(parents=True, exist_ok=True); save_config(cfg, output / "config.yaml"); setup_logger(cfg, output)
+    seed_everything(int(cfg.project.seed), bool(cfg.project.deterministic)); device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataset_type = MultimodalKneeDataset if cfg.data.get("multimodal", False) else KneeMRIDataset
+    train = dataset_type(cfg, "train", transform=create_train_transforms(cfg)); validation = dataset_type(cfg, "val", transform=create_val_transforms(cfg))
+    loader_kwargs = {"batch_size": int(cfg.training.batch_size), "num_workers": int(cfg.data.num_workers), "pin_memory": bool(cfg.data.pin_memory), "collate_fn": variable_length_collate, "worker_init_fn": worker_init_fn, "persistent_workers": bool(cfg.data.persistent_workers and cfg.data.num_workers > 0)}
+    train_loader = DataLoader(train, shuffle=True, generator=seeded_generator(int(cfg.project.seed)), **loader_kwargs); val_loader = DataLoader(validation, shuffle=False, **loader_kwargs)
+    model = ORIONMultimodalModel(cfg); optimizer = create_adamw(model, cfg.optimizer) if cfg.optimizer.name == "adamw" else create_sgd(model, cfg.optimizer)
+    scheduler = CosineAnnealingWithWarmup(optimizer, int(cfg.scheduler.warmup_epochs), int(cfg.training.max_epochs), float(cfg.scheduler.min_lr))
+    ema_cfg = cfg.model.get("ema", cfg.training.get("ema", {}))
+    ema = ModelEMA(model, float(ema_cfg.decay), device) if ema_cfg.get("enabled", False) else None
+    history = Trainer(model, optimizer, build_loss(cfg), device, train_loader, val_loader, cfg, scheduler, ema, list(cfg.labels.names or FINDINGS)).fit(output)
+    (output / "history.json").write_text(json.dumps(history, indent=2, allow_nan=True), encoding="utf-8")
+
+
+if __name__ == "__main__": main()

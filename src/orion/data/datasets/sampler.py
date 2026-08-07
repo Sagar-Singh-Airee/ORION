@@ -24,10 +24,14 @@ def create_balanced_sampler(labels: np.ndarray) -> WeightedRandomSampler:
     we might over-sample the effusion it's correlated with.
     A common heuristic is to assign each sample a weight based on its rarest positive class.
     """
+    labels = np.asarray(labels)
+    if labels.ndim != 2:
+        raise ValueError("labels must have shape (N, C)")
     N, C = labels.shape
     
     # 1. Calculate frequency of each class
-    class_counts = np.sum(labels, axis=0)
+    known = labels >= 0
+    class_counts = np.where(known, labels, 0).sum(axis=0)
     
     # Avoid division by zero
     class_counts = np.maximum(class_counts, 1)

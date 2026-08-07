@@ -1,0 +1,7 @@
+model:
+  text_encoder:
+    enabled: false
+    name: xlm_roberta_base
+    pretrained: true
+    max_length: 256
+    dropout: 0.1

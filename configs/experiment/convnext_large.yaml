@@ -1,0 +1,18 @@
+includes:
+  - model/heads.yaml
+  - training/loss.yaml
+
+experiment:
+  name: convnext_large_fold0
+  tags: [vision_only, convnext]
+
+model:
+  vision_backbone:
+    name: convnext_large
+    pretrained: true
+    in_channels: 1
+    drop_path_rate: 0.2
+
+training:
+  batch_size: 6
+  max_epochs: 40

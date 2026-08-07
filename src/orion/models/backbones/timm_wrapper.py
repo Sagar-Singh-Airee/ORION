@@ -42,6 +42,8 @@ class TimmBackbone(nn.Module):
         )
         
         # Get the output feature dimension
+        was_training = self.model.training
+        self.model.eval()
         with torch.no_grad():
             dummy_input = torch.randn(1, in_channels, 256, 256)
             dummy_out = self.model(dummy_input)
@@ -56,6 +58,7 @@ class TimmBackbone(nn.Module):
                 self.is_transformer = True
             else:
                 self.out_channels = dummy_out.shape[-1]
+        self.model.train(was_training)
                 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

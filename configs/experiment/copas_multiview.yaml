@@ -1,0 +1,18 @@
+includes:
+  - model/heads.yaml
+  - model/fusion.yaml
+
+experiment:
+  name: multiview_mil_fold0
+  tags: [multiview, mil]
+
+data:
+  use_all_series: true
+
+model:
+  vision_backbone:
+    name: swin_v2_base
+    pretrained: true
+  fusion:
+    type: gated_fusion
+    hidden_dim: 512

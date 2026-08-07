@@ -1,0 +1,7 @@
+inference:
+  ensemble:
+    method: rank_mean
+    weights: null
+  calibration:
+    enabled: true
+    source: out_of_fold_only

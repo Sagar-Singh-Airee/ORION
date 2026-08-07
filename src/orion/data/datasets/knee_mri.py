@@ -113,6 +113,14 @@ class KneeMRIDataset(BaseDataset):
                 f"{csv_path} needs one study-ID column ({', '.join(_STUDY_COLUMNS)}); "
                 f"found {list(frame.columns)}"
             )
+        split_cfg = _first(self.data_cfg, "splits", default={})
+        fold = _get(split_cfg, "fold", None)
+        if fold is not None and "fold" in frame.columns and self.split in {"train", "val"}:
+            frame = frame[frame["fold"] != int(fold)] if self.split == "train" else frame[frame["fold"] == int(fold)]
+        elif self.split == "val" and _get(self.data_cfg, "val_csv", None) is None and "fold" not in frame.columns:
+            raise ValueError("Validation requires data.val_csv or a 'fold' column plus data.splits.fold")
+        if frame.empty:
+            raise ValueError(f"No records remain for split={self.split!r}")
         records: list[dict[str, Any]] = []
         path_column = next((name for name in _PATH_COLUMNS if name in frame.columns), None)
         report_column = next((name for name in _REPORT_COLUMNS if name in frame.columns), None)

@@ -10,7 +10,7 @@ Keeping a constant learning rate (LR) is inefficient.
 import math
 from torch.optim.lr_scheduler import _LRScheduler # type: ignore
 from torch.optim import Optimizer
-from ...utils.registry import SCHEDULERS
+from ..utils.registry import SCHEDULERS
 
 @SCHEDULERS.register("cosine_with_warmup")
 class CosineAnnealingWithWarmup(_LRScheduler):

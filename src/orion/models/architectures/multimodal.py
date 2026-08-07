@@ -35,7 +35,8 @@ class ORIONMultimodalModel(nn.Module):
         self.text_encoder = None
         self.fusion = None
         output_dim = feature_dim
-        if text_cfg and _get(text_cfg, "enabled", True):
+        data_cfg = _get(config, "data", {})
+        if text_cfg and bool(_get(data_cfg, "multimodal", False) or _get(text_cfg, "enabled", False)):
             # Import registrations before the registry lookup.
             import orion.models.text_encoders  # noqa: F401
             self.text_encoder = TEXT_ENCODERS.build(_get(text_cfg, "name", "xlm_roberta_base"), pretrained=bool(_get(text_cfg, "pretrained", True)), dropout=float(_get(text_cfg, "dropout", 0.0)))

@@ -10,7 +10,13 @@ def export_onnx(model: torch.nn.Module, output_path: str | Path, image_size: tup
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     model = model.eval().cpu()
+    class _ImageOnlyWrapper(torch.nn.Module):
+        def __init__(self, wrapped: torch.nn.Module):
+            super().__init__(); self.wrapped = wrapped
+        def forward(self, image: torch.Tensor, slice_mask: torch.Tensor) -> torch.Tensor:
+            return self.wrapped(image=image, slice_mask=slice_mask)
+    wrapper = _ImageOnlyWrapper(model)
     image = torch.zeros(1, num_slices, 1, *image_size)
     mask = torch.ones(1, num_slices, dtype=torch.bool)
-    torch.onnx.export(model, (image, None, mask), path, input_names=["image", "text_inputs", "slice_mask"], output_names=["logits"], dynamic_axes={"image": {0: "batch", 1: "slices"}, "slice_mask": {0: "batch", 1: "slices"}, "logits": {0: "batch"}}, opset_version=17)
+    torch.onnx.export(wrapper, (image, mask), path, input_names=["image", "slice_mask"], output_names=["logits"], dynamic_axes={"image": {0: "batch", 1: "slices"}, "slice_mask": {0: "batch", 1: "slices"}, "logits": {0: "batch"}}, opset_version=17)
     return path

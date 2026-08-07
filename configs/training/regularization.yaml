@@ -1,0 +1,7 @@
+training:
+  gradient_clip_val: 5.0
+  early_stopping_patience: 10
+  label_smoothing: 0.0
+  mixup:
+    enabled: false
+    alpha: 0.4

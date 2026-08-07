@@ -1,0 +1,6 @@
+model:
+  vision_backbone:
+    name: swin_v2_base
+    pretrained: true
+    in_channels: 1
+    drop_path_rate: 0.2
