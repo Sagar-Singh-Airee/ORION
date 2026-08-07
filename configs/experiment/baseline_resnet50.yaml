@@ -1,0 +1,59 @@
+# Experiment: ResNet-50 Baseline
+# ─────────────────────────────────────────────────────────────────────────────
+# GOAL: Establish a clean, reproducible baseline using ResNet-50.
+# This is NOT the best model. It is the SANITY CHECK.
+# Every subsequent experiment must beat this baseline.
+#
+# WHY ResNet-50 first?
+#  - Well-understood architecture with predictable behavior
+#  - Fast to train (25M params, standard GPU memory)
+#  - Easy to debug (simple feature hierarchy)
+#  - Benchmark for comparing improvements from larger/better models
+
+defaults:
+  - ../default        # Inherit all defaults, then override below
+
+experiment:
+  name: "baseline_resnet50_fold0"
+  tags: ["baseline", "resnet50", "vision-only"]
+  notes: "Baseline experiment. ResNet-50 backbone, expert labels only, fold 0."
+
+data:
+  splits:
+    fold: 0
+  loader:
+    batch_size: 32       # ResNet-50 is small; use larger batch
+
+model:
+  vision_backbone:
+    name: "resnet50"
+    pretrained: true
+    freeze_until_epoch: 3    # Freeze backbone for 3 epochs to warm up head
+    drop_path_rate: 0.0      # ResNet doesn't use drop path
+  neck:
+    type: "attention_pool"
+    hidden_dim: 256
+  head:
+    hidden_dims: [256]
+    dropout: 0.3
+
+loss:
+  primary:
+    name: "bce"             # Start with simple BCE for baseline
+    pos_weight: null        # Set to class frequency inverse for imbalance
+
+optimizer:
+  lr: 1.0e-3              # Higher LR for baseline (we train head from scratch)
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 2
+
+training:
+  max_epochs: 30
+  mixed_precision: true
+  early_stopping_patience: 8
+
+# Expected result: val_macro_auc ~ 0.70-0.74
+# If significantly lower: check preprocessing pipeline
+# If significantly higher: check for data leakage

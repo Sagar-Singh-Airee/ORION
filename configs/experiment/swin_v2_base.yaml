@@ -1,0 +1,87 @@
+# Experiment: Swin Transformer V2 Base
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY Swin V2?
+#  - Hierarchical design: captures both local textures (cartilage damage)
+#    and global structures (knee compartments, bone shape)
+#  - Shifted window attention: efficient O(n) complexity vs. O(n²) full attention
+#  - V2 improvements: residual post-normalization for training stability,
+#    log-spaced continuous relative position bias for resolution transfer
+#  - State-of-the-art ImageNet performance (86.2% Top-1) → excellent transfer
+#  - Medical image pretraining checkpoints available via BiomedCLIP / REMEDIS
+
+defaults:
+  - ../default
+
+experiment:
+  name: "swin_v2_base_fold0"
+  tags: ["swin_v2", "vision-only", "asymmetric-loss", "weak-labels"]
+  notes: "Swin V2-B backbone, asymmetric loss, weak labels from reports."
+
+data:
+  use_weak_labels: true         # Critical: expand dataset via NLP-extracted labels
+  splits:
+    fold: 0
+  loader:
+    batch_size: 16              # Swin-B is larger; reduce batch size
+    num_workers: 6
+
+model:
+  vision_backbone:
+    name: "swin_v2_base"
+    pretrained: true
+    pretrained_source: "imagenet_22k"   # Start from ImageNet-22K for better transfer
+    img_size: 256
+    drop_path_rate: 0.3                 # Strong regularization for 88M param model
+    freeze_until_epoch: 5               # Freeze for 5 epochs (longer for larger model)
+    window_size: 8                      # Match to image size / 32
+
+  neck:
+    type: "attention_pool"
+    hidden_dim: 512
+    num_heads: 8
+    dropout: 0.1
+
+  head:
+    hidden_dims: [512, 256]
+    dropout: 0.4
+    activation: "gelu"
+
+  ema:
+    enabled: true
+    decay: 0.9998                       # EMA critical for large models
+
+loss:
+  primary:
+    name: "asymmetric"
+    gamma_pos: 0.0     # γ+ = 0: don't down-weight easy positives
+    gamma_neg: 4.0     # γ- = 4: strongly down-weight easy negatives
+    clip: 0.05         # Probability margin clip (removes easy negatives entirely)
+  auxiliary:
+    name: "label_smoothing_bce"
+    weight: 0.1
+    smoothing: 0.05
+
+optimizer:
+  name: "adamw"
+  lr: 5.0e-5                  # Lower LR for pre-trained backbone
+  weight_decay: 5.0e-2        # Strong WD for Swin
+  layer_decay: 0.85           # Gradually reduce LR for earlier layers
+  backbone_lr_multiplier: 0.1 # Backbone 10× lower than head
+
+scheduler:
+  name: "cosine_with_warmup"
+  warmup_epochs: 8
+  min_lr: 1.0e-7
+
+training:
+  max_epochs: 60
+  gradient_clip_val: 5.0       # Higher clip for transformers
+  gradient_accumulation_steps: 2   # Effective batch = 16 × 2 = 32
+  mixed_precision: true
+  early_stopping_patience: 12
+  swa:
+    enabled: true
+    start_epoch: 48
+    anneal_epochs: 8
+
+# Expected result: val_macro_auc ~ 0.83-0.87

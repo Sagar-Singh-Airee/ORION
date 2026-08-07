@@ -1,0 +1,166 @@
+# Data Augmentation Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY: Medical images have very limited training data. Augmentation
+# artificially expands the dataset by creating realistic variations.
+# Key principle: augmentations must be CLINICALLY PLAUSIBLE —
+# e.g., a knee MRI will not appear upside-down in real life.
+
+# ─── Spatial Augmentations ────────────────────────────────────────────────────
+spatial:
+  # Random Horizontal Flip
+  # WHY: A knee appears left-right flipped in different projections.
+  # This doubles effective training data.
+  # NOT valid for: axial orientation where left/right anatomy differs.
+  hflip:
+    enabled: true
+    p: 0.5
+
+  # Random Vertical Flip
+  # WHY: Less physiologically valid but can help with extreme views.
+  vflip:
+    enabled: false
+    p: 0.0
+
+  # Random Rotation
+  # WHY: Patient positioning varies; scanners may not be perfectly aligned.
+  rotation:
+    enabled: true
+    p: 0.5
+    limit: 15    # degrees; keep small for medical images
+
+  # Random Scaling / Zoom
+  # WHY: Simulates different FOV settings and patient sizes.
+  scale:
+    enabled: true
+    p: 0.3
+    scale_limit: 0.1   # ±10% scale
+
+  # Elastic Deformation
+  # WHY: Simulates soft tissue deformation, variation in anatomy.
+  # Especially useful for segmentation; use carefully for classification.
+  elastic:
+    enabled: false     # Disabled by default; enable after baseline
+    p: 0.2
+    alpha: 1.0
+    sigma: 50.0
+
+  # Random Crop
+  # WHY: Forces model to be robust to slight misalignment and
+  # focus on local structures, not just global position.
+  random_crop:
+    enabled: true
+    p: 1.0
+    scale: [0.85, 1.0]  # Crop 85-100% of image area
+    ratio: [0.9, 1.1]   # Aspect ratio variation
+
+  # Grid Distortion
+  # WHY: Simulates field inhomogeneity and imaging artifacts.
+  grid_distort:
+    enabled: false
+    p: 0.2
+
+# ─── Intensity Augmentations ──────────────────────────────────────────────────
+intensity:
+  # Brightness / Contrast
+  # WHY: MRI signal intensity varies by scanner gain, coil,
+  # and patient body habitus. Simulating this improves domain robustness.
+  brightness_contrast:
+    enabled: true
+    p: 0.5
+    brightness_limit: 0.2
+    contrast_limit: 0.2
+
+  # Gaussian Noise
+  # WHY: All MRI images have thermal noise (Johnson noise).
+  # Adding synthetic noise improves model robustness.
+  gaussian_noise:
+    enabled: true
+    p: 0.3
+    var_limit: [5.0, 20.0]
+
+  # Gaussian Blur
+  # WHY: Simulates lower-resolution scanners and partial volume effects.
+  gaussian_blur:
+    enabled: true
+    p: 0.2
+    blur_limit: [3, 5]
+
+  # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+  # WHY: Enhances local contrast in low-signal regions.
+  # Can help model find subtle findings.
+  clahe:
+    enabled: false    # Only use if baseline is undertrained
+    p: 0.1
+    clip_limit: 2.0
+
+  # Gamma Correction
+  # WHY: Simulates variation in display calibration / viewing conditions.
+  gamma:
+    enabled: true
+    p: 0.2
+    gamma_limit: [70, 130]
+
+  # Coarse Dropout / CutOut
+  # WHY: Forces model to be robust to image occlusions.
+  # Acts as a strong regularizer.
+  coarse_dropout:
+    enabled: true
+    p: 0.3
+    max_holes: 8
+    max_height: 32
+    max_width: 32
+
+# ─── MRI-Specific Augmentations (TorchIO) ─────────────────────────────────────
+# WHY: Standard CV augmentation libraries don't model MRI artifacts.
+# TorchIO provides physics-informed 3D augmentations.
+
+mri_specific:
+  # Bias Field Corruption
+  # WHY: MRI coils create spatially varying signal (intensity gradient).
+  # This simulates inter-scanner and inter-patient variation.
+  bias_field:
+    enabled: true
+    p: 0.3
+    coefficients: 0.5
+    order: 3
+
+  # Motion Artifact (k-space motion)
+  # WHY: Patient motion during MRI acquisition creates ghosting artifacts.
+  # Simulating this prevents overfitting to artifact-free training data.
+  motion:
+    enabled: false    # Expensive; enable for final runs
+    p: 0.2
+    degrees: 5.0
+    translation: 5.0
+
+  # Spike Artifact
+  # WHY: k-space spikes from RF interference create banding artifacts.
+  spike:
+    enabled: false
+    p: 0.1
+
+# ─── Mixup / CutMix ───────────────────────────────────────────────────────────
+# WHY: Mixing two training examples improves calibration and
+# interpolation behavior in latent space.
+# Critical for multi-label: soft labels from mixup prevent overconfidence.
+
+mixup:
+  enabled: true
+  p: 0.3
+  alpha: 0.4         # Beta distribution parameter; higher = more mixing
+
+cutmix:
+  enabled: false     # Harder to interpret medically; use only after baseline
+  p: 0.3
+  alpha: 1.0
+
+# ─── Test-Time Augmentation (TTA) ─────────────────────────────────────────────
+tta:
+  enabled: true
+  strategies:
+    - "original"     # No augmentation
+    - "hflip"        # Horizontal flip
+    - "vflip"        # Vertical flip (if enabled above)
+    - "rotate_90"    # 90 degree rotation
+    - "rotate_270"   # 270 degree rotation
+  aggregation: "mean"   # mean | max | median

@@ -1,0 +1,98 @@
+# Experiment: Full Multimodal (Vision + Text)
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY Multimodal matters here:
+#  - Reports contain CLINICAL INFORMATION invisible in images:
+#    - "Patient history of prior ACL repair" → ACL finding context
+#    - "Severe OA on prior X-ray" → prior severity
+#    - "Clinical suspicion of meniscal tear" → referring physician's view
+#  - 9 languages: XLM-RoBERTa handles multilingual reports natively
+#  - Cross-modal attention lets the model ask: "which image region
+#    supports the finding mentioned in the report?"
+#
+# Architecture:
+#   Image: Swin V2-B → Attention Pool → Visual tokens [B, 512]
+#   Text:  XLM-RoBERTa → [CLS] → Projected → Text tokens [B, 512]
+#   Fusion: Cross-attention + Gated fusion → [B, 512]
+#   Head:  12-class multi-label output
+
+defaults:
+  - ../default
+
+experiment:
+  name: "multimodal_swin_xlmr_fold0"
+  tags: ["multimodal", "swin_v2", "xlm-roberta", "cross-attention"]
+  notes: "Full multimodal: Swin V2-B vision + XLM-RoBERTa text. Cross-attention fusion."
+
+data:
+  multimodal: true              # Enable radiology report loading
+  use_weak_labels: true
+  loader:
+    batch_size: 8               # Multimodal uses more memory
+    num_workers: 4
+
+model:
+  vision_backbone:
+    name: "swin_v2_base"
+    pretrained: true
+    drop_path_rate: 0.2
+    freeze_until_epoch: 5
+
+  text_encoder:
+    name: "xlm_roberta_base"    # Handles all 9 report languages
+    pretrained: true
+    max_length: 512             # Truncate reports at 512 tokens
+    freeze_until_epoch: 3
+    dropout: 0.1
+
+  neck:
+    type: "attention_pool"
+    hidden_dim: 512
+
+  fusion:
+    type: "cross_attention"
+    hidden_dim: 512
+    num_heads: 8
+    num_layers: 2               # 2 cross-attention layers
+    dropout: 0.1
+    # Gating: learnable weight to balance vision vs. text
+    # If report quality is low (noisy/wrong language), gate→0 (ignore text)
+    use_gating: true
+
+  head:
+    hidden_dims: [512, 256]
+    dropout: 0.4
+
+  ema:
+    enabled: true
+    decay: 0.9999
+
+loss:
+  primary:
+    name: "asymmetric"
+    gamma_neg: 4.0
+    clip: 0.05
+    weight: 1.0
+  # Contrastive loss: pull (image, matching_report) pairs together in embedding space
+  # WHY: Improves fusion quality before task-specific training
+  contrastive:
+    name: "nt_xent"
+    temperature: 0.07
+    weight: 0.1
+
+optimizer:
+  lr: 3.0e-5                  # Low LR for multimodal (two large encoders)
+  weight_decay: 5.0e-2
+  layer_decay: 0.9
+  backbone_lr_multiplier: 0.05   # Vision backbone: 5% of head LR
+  text_lr_multiplier: 0.05       # Text encoder: 5% of head LR
+
+scheduler:
+  warmup_epochs: 10
+
+training:
+  max_epochs: 80
+  gradient_clip_val: 5.0
+  gradient_accumulation_steps: 4  # Effective batch = 8 × 4 = 32
+  mixed_precision: true
+
+# Expected result: val_macro_auc ~ 0.87-0.91

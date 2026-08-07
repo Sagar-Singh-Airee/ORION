@@ -1,0 +1,94 @@
+# DICOM Preprocessing Pipeline Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY: Raw DICOM pixel data is NOT displayable without transformation.
+# DICOM stores values as "stored pixel values" which must be mapped to
+# meaningful Hounsfield Units (CT) or displayed grayscale (MRI) via
+# Look-Up Tables (LUTs). Skipping this step = model sees garbage data.
+
+dicom:
+  # ── VOI-LUT (Values of Interest Look-Up Table) ─────────────────────────
+  # WHY: Radiologists specify the clinical display window (center/width)
+  # in the DICOM header. We must apply this to show clinically relevant
+  # contrast. Ignoring it means bones look the same as soft tissue.
+  apply_voi_lut: true
+  prefer_lut_over_linear: true   # True = use stored LUT table; False = use WindowCenter/Width
+  force_return_rgb: false        # MRI is grayscale; don't force RGB conversion
+
+  # ── Photometric Correction ─────────────────────────────────────────────
+  # WHY: MONOCHROME1 images are INVERTED (bright = low value).
+  # Models trained on MONOCHROME2 (bright = high) will be confused.
+  # This is a very common but silent failure mode.
+  fix_photometric_interpretation: true
+
+  # ── Orientation & Coordinate System ───────────────────────────────────
+  # WHY: Different scanners/protocols store slices in different orientations.
+  # "ImageOrientationPatient" DICOM tag tells us how pixels map to real space.
+  # Standardizing prevents anatomical flips (left-right, superior-inferior).
+  standardize_orientation: true
+  target_orientation: "RAS"     # Right-Anterior-Superior standard
+
+  # ── Slice Selection ────────────────────────────────────────────────────
+  # WHY: MRI volumes have variable numbers of slices (30-80+ for knee).
+  # We need a fixed-size representation for batching.
+  # Strategy: Attention-based models prefer ALL slices (MIL),
+  # but fixed-size models need uniform sampling.
+  slice_selection:
+    strategy: "uniform"          # uniform | center | attention | all
+    num_slices: 24               # Target slice count
+    pad_if_fewer: true           # Zero-pad volumes with fewer slices
+    pad_value: 0.0
+
+  # ── Spatial Normalization ─────────────────────────────────────────────
+  # WHY: Different MRI protocols have different voxel spacings (pixel size in mm).
+  # Resampling to a common spacing ensures spatial consistency.
+  resample:
+    enabled: false               # Disabled by default (too slow for first experiments)
+    target_spacing: [0.5, 0.5]  # mm per pixel in-plane
+
+  # ── Intensity Normalization ────────────────────────────────────────────
+  # WHY: MRI has no absolute intensity scale (unlike CT Hounsfield Units).
+  # Signal intensities vary between scanners, patients, and coils.
+  # Normalization removes scanner-specific bias and helps training converge.
+  normalization:
+    method: "percentile"         # global_minmax | percentile | zscore | none
+    percentile_low: 0.5          # Clip at 0.5th percentile (removes extreme outliers)
+    percentile_high: 99.5
+    target_range: [0.0, 1.0]    # Normalize to [0, 1]
+
+  # ── Output Format ──────────────────────────────────────────────────────
+  output:
+    dtype: "float32"
+    image_size: [256, 256]       # Resize to H × W
+    resize_mode: "bilinear"      # bilinear | nearest | bicubic
+
+# ─── Series Selection ─────────────────────────────────────────────────────────
+# WHY: A knee MRI study contains MULTIPLE series (T1, T2, PD, STIR, etc.),
+# each providing different tissue contrast information.
+# We need a strategy to select which series to use.
+
+series_selection:
+  # Use ALL series (best for multimodal/multi-series fusion)
+  use_all_series: true
+
+  # OR specify preferred sequence types by name matching
+  preferred_sequences:
+    - "sag"       # Sagittal (best for ACL/PCL, menisci)
+    - "cor"       # Coronal (best for MCL/LCL, compartments)
+    - "ax"        # Axial (best for patellofemoral, cartilage)
+    - "pd"        # Proton Density (best overall soft tissue)
+    - "t2"        # T2 (fluid, edema, effusion)
+    - "stir"      # STIR (bone marrow edema, contusions)
+
+  # If a preferred sequence is absent, fall back to this
+  fallback_strategy: "largest_series"   # largest_series | first_series
+
+# ─── Cache Configuration ─────────────────────────────────────────────────────
+# WHY: DICOM processing is CPU-bound and slow (1-5 sec per study).
+# Caching pre-processed tensors to disk reduces epoch time from hours to minutes.
+
+cache:
+  enabled: true
+  backend: "lmdb"                # lmdb | hdf5 | numpy
+  dir: ${oc.env:CACHE_DIR,/tmp/orion-cache}/preprocessed
+  compression: false             # True reduces disk usage, increases CPU overhead
+  verify_checksums: true         # Detect corrupted cache entries
