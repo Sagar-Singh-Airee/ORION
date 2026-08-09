@@ -17,9 +17,11 @@ class TemperatureScaler:
         self.temperatures = temperatures
 
     def fit(self, probabilities: np.ndarray, targets: np.ndarray) -> "TemperatureScaler":
-        probabilities, targets = np.asarray(probabilities), np.asarray(targets)
+        probabilities, targets = np.asarray(probabilities, dtype=float), np.asarray(targets, dtype=float)
         if probabilities.shape != targets.shape or probabilities.ndim != 2:
             raise ValueError("probabilities and targets must be same (N, C) shape")
+        if not np.isfinite(probabilities).all() or not np.isfinite(targets).all():
+            raise ValueError("probabilities and targets must be finite")
         temperatures = np.ones(probabilities.shape[1], dtype=float)
         logits = _logit(probabilities)
         for index in range(probabilities.shape[1]):
@@ -37,6 +39,11 @@ class TemperatureScaler:
     def transform(self, probabilities: np.ndarray) -> np.ndarray:
         if self.temperatures is None:
             raise RuntimeError("Call fit before transform")
+        probabilities = np.asarray(probabilities, dtype=float)
+        if probabilities.ndim != 2 or probabilities.shape[1] != len(self.temperatures):
+            raise ValueError("probabilities must have the same number of columns used during fit")
+        if not np.isfinite(probabilities).all():
+            raise ValueError("probabilities must be finite")
         logits = _logit(probabilities)
         return (1 / (1 + np.exp(-logits / self.temperatures))).astype(np.float32)
 

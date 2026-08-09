@@ -55,10 +55,7 @@ class AttentionPool(nn.Module):
             # e.g., [B, C, H, W] single image -> [B, H*W, C]
             B, C, H, W = x.shape
             x = x.view(B, C, H * W).permute(0, 2, 1)
-        elif x.dim() == 3:
-            # Already [B, N, C]
-            pass
-        else:
+        elif x.dim() != 3:
             raise ValueError(f"Unsupported input shape for AttentionPool: {x.shape}")
             
         B, N, C = x.shape

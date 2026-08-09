@@ -8,10 +8,9 @@ import torch
 import torch.nn as nn
 
 from ...data.text.label_extractor import FINDINGS
-from ...utils.registry import FUSION
+from ...utils.registry import FUSION, NECKS
 from ..backbones import build_backbone
 from ..heads.classification import MultiLabelHead
-from ..necks.slice_aggregator import SliceAttentionAggregator
 from ..text_encoders import TEXT_ENCODERS
 
 
@@ -30,7 +29,18 @@ class ORIONMultimodalModel(nn.Module):
         self.vision_backbone = build_backbone(backbone_name, pretrained=bool(_get(vision_cfg, "pretrained", False)), in_channels=int(_get(vision_cfg, "in_channels", 1)), drop_path_rate=float(_get(vision_cfg, "drop_path_rate", 0.0)))
         feature_dim = int(self.vision_backbone.out_channels)
         neck_cfg = _get(model_cfg, "neck", {})
-        self.vision_neck = SliceAttentionAggregator(feature_dim, hidden_dim=_get(neck_cfg, "hidden_dim", None), dropout=float(_get(neck_cfg, "dropout", 0.0)))
+        neck_type = str(_get(neck_cfg, "type", "slice_attention"))
+        configured_hidden = _get(neck_cfg, "hidden_dim", None)
+        hidden_dim = int(configured_hidden) if configured_hidden is not None else max(64, feature_dim // 2)
+        # Importing the package registers all supported pooling modules before lookup.
+        import orion.models.necks  # noqa: F401
+        self.vision_neck = NECKS.build(
+            neck_type,
+            in_dim=feature_dim,
+            hidden_dim=hidden_dim,
+            dropout=float(_get(neck_cfg, "dropout", 0.0)),
+        )
+        self.freeze_backbone_until_epoch = max(0, int(_get(vision_cfg, "freeze_until_epoch", 0)))
         text_cfg = _get(model_cfg, "text_encoder", None)
         self.text_encoder = None
         self.fusion = None

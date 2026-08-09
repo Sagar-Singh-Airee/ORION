@@ -11,8 +11,12 @@ def ensemble_predictions(predictions: Sequence[np.ndarray], weights: Sequence[fl
         raise ValueError("At least one prediction array is required")
     arrays = [np.asarray(prediction, dtype=np.float64) for prediction in predictions]
     shape = arrays[0].shape
+    if len(shape) != 2:
+        raise ValueError("Each prediction array must have shape (N, C)")
     if any(array.shape != shape for array in arrays):
         raise ValueError("All prediction arrays must have the same shape")
+    if any(not np.isfinite(array).all() for array in arrays):
+        raise ValueError("Predictions contain NaN or infinite values")
     stack = np.stack(arrays, axis=0)
     if method == "mean":
         if weights is None:

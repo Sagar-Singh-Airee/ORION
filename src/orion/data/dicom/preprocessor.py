@@ -29,14 +29,6 @@ def _get(config: Any, key: str, default: Any = None) -> Any:
     return getattr(config, key, default)
 
 
-def _nested(config: Any, *keys: str, default: Any = None) -> Any:
-    current = config
-    for key in keys:
-        current = _get(current, key, None)
-        if current is None:
-            return default
-    return current
-
 def fix_photometric_interpretation(image: np.ndarray, dicom_dataset: pydicom.FileDataset) -> np.ndarray:
     """
     Fixes photometric inversion.
@@ -70,7 +62,7 @@ def apply_windowing(image: np.ndarray, dicom_dataset: pydicom.FileDataset) -> np
     try:
         windowed = apply_voi_lut(image, dicom_dataset)
         return windowed
-    except Exception as e:
+    except Exception:
         # Fallback to manual windowing if tags are missing or malformed
         # Usually MRI doesn't strictly need VOI LUT as much as CT (HU), 
         # but it's safe to attempt.
@@ -181,22 +173,20 @@ def preprocess_volume(
     if slices is not None and len(slices) != len(volume):
         raise ValueError("Number of DICOM datasets must match volume slice count")
 
-    processed_slices = []
-    
-    for i in range(len(volume)):
-        img = volume[i].copy()
-        ds = slices[i] if slices is not None else None
-        # Fix inversion
-        if ds is not None and _get(config, "fix_photometric_interpretation", _get(config, "fix_photometric", True)):
-            img = fix_photometric_interpretation(img, ds)
-            
-        # Apply clinical windowing
-        if ds is not None and _get(config, "apply_voi_lut", True):
-            img = apply_windowing(img, ds)
-            
-        processed_slices.append(img)
-        
-    processed_vol = np.stack(processed_slices, axis=0)
+    fix_photometric = _get(config, "fix_photometric_interpretation", _get(config, "fix_photometric", True))
+    apply_voi = _get(config, "apply_voi_lut", True)
+    if slices is None or not (fix_photometric or apply_voi):
+        processed_vol = volume.astype(np.float32, copy=True)
+    else:
+        processed_slices = []
+        for image, dataset in zip(volume, slices, strict=True):
+            processed = image.copy()
+            if fix_photometric:
+                processed = fix_photometric_interpretation(processed, dataset)
+            if apply_voi:
+                processed = apply_windowing(processed, dataset)
+            processed_slices.append(processed)
+        processed_vol = np.stack(processed_slices, axis=0)
     
     # 2. Global volume normalization
     norm_cfg = _get(config, "normalization", config)

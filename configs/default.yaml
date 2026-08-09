@@ -38,18 +38,27 @@ data:
     slice_selection:
       strategy: uniform
       num_slices: ${data.num_slices}
+    series_selection:
+      preferred_sequences: [sag, cor, ax, pd, t2, stir]
     output:
       image_size: [${data.image_size}, ${data.image_size}]
     cache:
       enabled: true
       backend: numpy
       dir: ${data.cache_dir}/preprocessed
+  augmentation:
+    spatial:
+      hflip: {enabled: true, p: 0.5}
+      rotation: {enabled: true, limit: 10, p: 0.35}
+      scale: {enabled: true, scale_limit: 0.08, p: 0.25}
+      random_crop: {enabled: false}
+    intensity:
+      brightness_contrast: {enabled: true, brightness_limit: 0.1, contrast_limit: 0.1, p: 0.3}
+      gaussian_noise: {enabled: true, var_limit: [5.0, 15.0], p: 0.2}
+      gaussian_blur: {enabled: false}
+      gamma: {enabled: true, gamma_limit: [90, 110], p: 0.2}
 
 model:
-  backbone:
-    name: swin_v2_base
-    pretrained: true
-    kwargs: {}
   text_encoder:
     name: xlm_roberta_base
     pretrained: true

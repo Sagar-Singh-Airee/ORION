@@ -7,12 +7,11 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import pydicom
 import torch
 
 from ...data.cache import NpyDiskCache
 from ...data.dicom.preprocessor import preprocess_volume, select_slice_indices
-from ...data.dicom.reader import DicomSeries, load_study, read_series_datasets
+from ...data.dicom.reader import load_best_series
 from ...data.text.label_extractor import FINDINGS
 from .base import BaseDataset
 
@@ -65,10 +64,11 @@ class KneeMRIDataset(BaseDataset):
         if not _get(cache_cfg, "enabled", False):
             return None
         backend = str(_get(cache_cfg, "backend", "numpy")).lower()
-        if backend not in {"numpy", "npy", "lmdb", "hdf5"}:
-            raise ValueError(f"Unsupported cache backend {backend!r}")
-        # The portable NPY implementation is deliberate: no LMDB writer locks in
-        # Kaggle DataLoader workers. The logical backend name remains accepted.
+        if backend not in {"numpy", "npy"}:
+            raise ValueError(
+                f"Unsupported cache backend {backend!r}. Only the portable NumPy cache is implemented."
+            )
+        # NPY files avoid database writer locks in Kaggle DataLoader workers.
         directory = _get(cache_cfg, "dir", self.root / ".orion-cache")
         return NpyDiskCache(directory, namespace="dicom-v2")
 
@@ -166,7 +166,26 @@ class KneeMRIDataset(BaseDataset):
         return values
 
     def _cache_key(self, record: dict[str, Any]) -> str:
-        return f"{record['study_uid']}:{self._target_slices()}:{self._image_size()}"
+        selection = _first(self.preprocess_cfg, "slice_selection", default={})
+        normalisation = _first(self.preprocess_cfg, "normalization", default={})
+        return ":".join(
+            map(
+                str,
+                (
+                    record["study_path"],
+                    self._target_slices(),
+                    self._image_size(),
+                    _get(selection, "strategy", "uniform"),
+                    _get(normalisation, "method", "percentile"),
+                    _get(normalisation, "percentile_low", None),
+                    _get(normalisation, "percentile_high", None),
+                    tuple(_get(normalisation, "target_range", (0.0, 1.0))),
+                    _get(self.preprocess_cfg, "apply_voi_lut", True),
+                    _get(self.preprocess_cfg, "fix_photometric_interpretation", True),
+                    tuple(self._preferred_sequences()),
+                ),
+            )
+        )
 
     def _target_slices(self) -> int:
         selection = _first(self.preprocess_cfg, "slice_selection", default={})
@@ -177,20 +196,9 @@ class KneeMRIDataset(BaseDataset):
         size = _first(output, "image_size", default=_first(self.data_cfg, "image_size", default=(384, 384)))
         return int(size[0]), int(size[1])
 
-    def _select_series(self, series: list[DicomSeries]) -> DicomSeries:
-        if not series:
-            raise ValueError("Study contains no readable 2-D DICOM series")
+    def _preferred_sequences(self) -> list[str]:
         preferred = _first(_first(self.preprocess_cfg, "series_selection", default={}), "preferred_sequences", default=[])
-        preferred = [str(item).lower() for item in preferred]
-        ranked = sorted(
-            series,
-            key=lambda item: (
-                sum(token in item.metadata.series_description.lower() for token in preferred),
-                item.metadata.num_slices,
-            ),
-            reverse=True,
-        )
-        return ranked[0]
+        return [str(item).lower() for item in preferred]
 
     def _load_volume(self, record: dict[str, Any]) -> tuple[np.ndarray, int, str]:
         key = self._cache_key(record)
@@ -200,9 +208,10 @@ class KneeMRIDataset(BaseDataset):
         study_path = Path(record["study_path"])
         if not study_path.exists():
             raise FileNotFoundError(f"DICOM study directory does not exist: {study_path}")
-        selected = self._select_series(load_study(study_path))
-        datasets = [dataset for _, dataset in read_series_datasets(selected.file_paths)]
-        volume = preprocess_volume(selected.pixel_array, datasets, self.preprocess_cfg)
+        selected = load_best_series(study_path, self._preferred_sequences())
+        if selected is None:
+            raise ValueError(f"Study contains no readable 2-D DICOM series: {study_path}")
+        volume = preprocess_volume(selected.pixel_array, selected.datasets or None, self.preprocess_cfg)
         original_count = len(volume)
         selection = _first(self.preprocess_cfg, "slice_selection", default={})
         indices = select_slice_indices(original_count, self._target_slices(), str(_get(selection, "strategy", "uniform")))

@@ -12,7 +12,7 @@ tie-breaker / fallback when ImagePositionPatient is missing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +43,7 @@ class DicomSeries:
     file_paths: list[Path]          # sorted to match pixel_array order
     pixel_array: np.ndarray         # (num_slices, H, W), rescaled (slope/intercept applied)
     slice_positions: np.ndarray     # (num_slices,) signed projection used for sort order
+    datasets: list[pydicom.Dataset] = field(default_factory=list)  # ordered; avoids a second full DICOM read
 
 
 def _safe_float(value, default=None):
@@ -52,9 +53,9 @@ def _safe_float(value, default=None):
         return default
 
 
-def _read_one(path: Path) -> pydicom.Dataset | None:
+def _read_one(path: Path, *, stop_before_pixels: bool = False) -> pydicom.Dataset | None:
     try:
-        return pydicom.dcmread(str(path), force=True)
+        return pydicom.dcmread(str(path), force=True, stop_before_pixels=stop_before_pixels)
     except (InvalidDicomError, OSError):
         return None
 
@@ -77,12 +78,37 @@ def discover_series(study_dir: str | Path) -> dict[str, list[Path]]:
     for path in study_dir.rglob("*"):
         if not path.is_file():
             continue
-        ds = _read_one(path)
+        # Discovery only needs the series UID. Skipping pixel bytes removes the
+        # largest source of wasted I/O for studies with multiple sequences.
+        ds = _read_one(path, stop_before_pixels=True)
         if ds is None or "SeriesInstanceUID" not in ds:
             continue
         series_map.setdefault(ds.SeriesInstanceUID, []).append(path)
 
     return series_map
+
+
+def load_best_series(study_dir: str | Path, preferred_tokens: list[str] | None = None) -> DicomSeries | None:
+    """Load exactly one likely-useful series instead of decoding every study series.
+
+    Header-only inspection ranks descriptions first and slice count second. This is
+    the dataset fast path; :func:`load_study` remains available for EDA workflows
+    that genuinely need every sequence.
+    """
+    preferred = [token.lower() for token in (preferred_tokens or [])]
+    candidates: list[tuple[int, int, str, list[Path]]] = []
+    for uid, paths in discover_series(study_dir).items():
+        header = _read_one(paths[0], stop_before_pixels=True)
+        if header is None:
+            continue
+        description = str(getattr(header, "SeriesDescription", "")).lower()
+        score = sum(token in description for token in preferred)
+        candidates.append((score, len(paths), uid, paths))
+    for _, _, uid, paths in sorted(candidates, key=lambda item: (-item[0], -item[1], item[2])):
+        series = load_series(uid, paths)
+        if series is not None:
+            return series
+    return None
 
 
 def _slice_normal(iop: list[float]) -> np.ndarray:
@@ -164,7 +190,11 @@ def load_series(series_uid: str, file_paths: list[Path]) -> DicomSeries | None:
     )
 
     return DicomSeries(
-        metadata=meta, file_paths=ordered_paths, pixel_array=pixel_array, slice_positions=positions,
+        metadata=meta,
+        file_paths=ordered_paths,
+        pixel_array=pixel_array,
+        slice_positions=positions,
+        datasets=ordered_ds,
     )
 
 

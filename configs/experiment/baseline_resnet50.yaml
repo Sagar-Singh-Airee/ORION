@@ -21,8 +21,6 @@ experiment:
 data:
   splits:
     fold: 0
-  loader:
-    batch_size: 32       # ResNet-50 is small; use larger batch
 
 model:
   vision_backbone:
@@ -54,6 +52,5 @@ training:
   mixed_precision: true
   early_stopping_patience: 8
 
-# Expected result: val_macro_auc ~ 0.70-0.74
-# If significantly lower: check preprocessing pipeline
-# If significantly higher: check for data leakage
+# Compare this fold's OOF metrics with later experiments; do not assume a score
+# before observing validation data.
