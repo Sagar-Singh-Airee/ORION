@@ -8,146 +8,170 @@ This module extracts that metadata for analysis or conditional processing.
 """
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+import re
+from typing import Any
 
 import pydicom
+from loguru import logger
 
-__all__ = ["extract_study_metadata", "identify_sequence_type", "classify_sequence", "SequenceComponents"]
+__all__ = ["extract_study_metadata", "identify_sequence_type"]
 
 
-def _as_str(value: Any, default: str = "UNKNOWN") -> str:
-    """Normalize to a plain str, treating None/empty/whitespace-only as missing.
+def _get_string(ds: pydicom.FileDataset, tag: str, default: str = "UNKNOWN") -> str:
+    """Coerce a DICOM tag to a clean string.
 
-    A DICOM tag can be *present* with an empty value (e.g. de-identified data) —
-    plain `getattr(ds, tag, default)` only catches a tag that's absent entirely,
-    not one that's present-but-blank, so that case is handled here explicitly.
+    Handles two common real-world artifacts that plain `getattr(ds, tag, default)`
+    doesn't: a tag that exists but is empty (frequent after anonymization, which
+    often blanks a value rather than removing the tag), and a genuinely
+    multi-valued tag (e.g. ScanningSequence=['SE', 'IR']), which pydicom exposes
+    as a MultiValue — joined with '\\', DICOM's own convention for multi-valued
+    strings, rather than falling through to Python's list repr.
     """
+    value = getattr(ds, tag, None)
     if value is None:
         return default
-    text = str(value).strip()
+    if isinstance(value, str):
+        text = value
+    elif hasattr(value, "__iter__"):
+        text = "\\".join(str(item) for item in value)
+    else:
+        text = str(value)
+    text = text.strip()
     return text if text else default
 
 
-def _as_float(value: Any, default: float = -1.0) -> float:
-    """Normalize to a plain float, catching pydicom's numeric wrapper types, None, and ''."""
+def _get_numeric(ds: pydicom.FileDataset, tag: str, default: float = -1.0) -> float:
+    """Coerce a DICOM tag to a float, treating an empty-but-present value (same
+    anonymization artifact as above) or an unparseable value as missing rather
+    than letting it silently reach downstream numeric code as a raw string.
+    """
+    value = getattr(ds, tag, None)
+    if value is None or value == "":
+        return default
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
 
 
-def _as_float_list(value: Any) -> list[float]:
-    """Normalize a multi-valued DICOM field (e.g. PixelSpacing) to a plain list[float].
+def _get_float_list(ds: pydicom.FileDataset, tag: str, length: int, sentinel: float = -1.0) -> list[float]:
+    """Coerce a multi-valued numeric DICOM tag to a plain list[float] of a fixed length.
 
-    pydicom represents multi-valued fields as `MultiValue`, which is not JSON-serializable —
-    every field returned by this module needs to survive `json.dumps` given how pervasively
-    this project writes metadata into manifests/audit trails.
+    Ensures callers get a consistent shape and type whether or not the tag was
+    present: pydicom returns a MultiValue of DSfloat when present, which isn't
+    interchangeable with a plain Python list for JSON serialization or vector
+    math — and the original code's "missing" default didn't even match the
+    "present" case's length (e.g. ImageOrientationPatient: `[]` vs 6 real values).
     """
+    default = [sentinel] * length
+    value = getattr(ds, tag, None)
     if value is None:
-        return []
+        return default
     try:
-        return [float(item) for item in value]
+        parsed = [float(item) for item in value]
     except (TypeError, ValueError):
-        return []
+        return default
+    return parsed if len(parsed) == length else default
 
 
 def extract_study_metadata(slices: list[pydicom.FileDataset]) -> dict[str, Any]:
     """
     Extracts relevant study and series metadata from the first slice.
-    Assuming all slices in a series share these properties — this function does not
-    itself verify that assumption (e.g. that every slice shares one SeriesInstanceUID);
-    that's the DICOM integrity/validator module's responsibility, not this extractor's.
-
-    Returns a dict with the same fixed set of keys whether or not `slices` is empty,
-    so callers never need to special-case an empty result.
+    Assumes all slices in a series share these properties.
     """
-    ds = slices[0] if slices else None
+    if not slices:
+        raise ValueError("Cannot extract metadata from an empty slice list")
 
-    def get(tag: str, default: Any = None) -> Any:
-        return getattr(ds, tag, default) if ds is not None else default
+    ds = slices[0]
 
-    metadata = {
+    return {
         # Identifiers
-        "PatientID": _as_str(get("PatientID")),
-        "StudyInstanceUID": _as_str(get("StudyInstanceUID")),
-        "SeriesInstanceUID": _as_str(get("SeriesInstanceUID")),
+        "PatientID": _get_string(ds, "PatientID"),
+        "StudyInstanceUID": _get_string(ds, "StudyInstanceUID"),
+        "SeriesInstanceUID": _get_string(ds, "SeriesInstanceUID"),
         # Scanner Info
-        "Manufacturer": _as_str(get("Manufacturer")),
-        "ManufacturerModelName": _as_str(get("ManufacturerModelName")),
-        "MagneticFieldStrength": _as_float(get("MagneticFieldStrength")),
+        "Manufacturer": _get_string(ds, "Manufacturer"),
+        "ManufacturerModelName": _get_string(ds, "ManufacturerModelName"),
+        "MagneticFieldStrength": _get_numeric(ds, "MagneticFieldStrength"),
         # Sequence Info
-        "SeriesDescription": _as_str(get("SeriesDescription")),
-        "ProtocolName": _as_str(get("ProtocolName")),
-        "ScanningSequence": _as_str(get("ScanningSequence")),
-        "SequenceVariant": _as_str(get("SequenceVariant")),
+        "SeriesDescription": _get_string(ds, "SeriesDescription"),
+        "ProtocolName": _get_string(ds, "ProtocolName"),
+        "ScanningSequence": _get_string(ds, "ScanningSequence"),
+        "SequenceVariant": _get_string(ds, "SequenceVariant"),
         # Spatial Info
-        "SliceThickness": _as_float(get("SliceThickness")),
-        "PixelSpacing": _as_float_list(get("PixelSpacing")),
-        "ImageOrientationPatient": _as_float_list(get("ImageOrientationPatient")),
+        "SliceThickness": _get_numeric(ds, "SliceThickness"),
+        "PixelSpacing": _get_float_list(ds, "PixelSpacing", length=2),
+        "ImageOrientationPatient": _get_float_list(ds, "ImageOrientationPatient", length=6),
         # Volume info
         "NumSlices": len(slices),
     }
 
-    return metadata
+
+_TOKEN_PATTERN_CACHE: dict[str, re.Pattern] = {}
 
 
-class SequenceComponents(NamedTuple):
-    """Structured alternative to identify_sequence_type's packed string, for callers
-    that want to branch on orientation/weighting/fat-sat directly instead of parsing.
+def _contains_token(text: str, token: str) -> bool:
+    """Match `token` at the start of a word-like chunk (preceded by whitespace,
+    underscore, hyphen, or the string start) rather than as a raw substring
+    anywhere.
+
+    Prefix matches like 'sag' catching 'sagittal', or 't2' catching 't2_tse_sag',
+    still work correctly. What this removes is accidental *mid-word* hits — 'ax'
+    inside 'relaxation', 'fs' inside 'offset', 'pd' inside 'update' — which plain
+    `token in text` would wrongly count, and which are a real risk given how
+    heterogeneous series descriptions are across 16 institutions and 9 languages.
+
+    Patterns are cached since this runs on every series across the whole dataset;
+    recompiling per call would undo the point of using regex here at all.
+
+    Note: this cannot distinguish two genuinely different words sharing the same
+    prefix (a scanner model name that happens to start with the same letters as
+    an orientation/sequence token) — that needs a real vocabulary lookup, not a
+    boundary check, and is out of scope for this heuristic.
     """
-
-    orientation: str
-    weighting: str
-    fat_saturated: bool
-
-
-def classify_sequence(series_description: str | None) -> SequenceComponents:
-    """
-    Heuristically identifies orientation, contrast weighting, and fat saturation from
-    a (messy, vendor-inconsistent) series description.
-
-    WHY: We might want to train models specifically on Sagittal T2, or
-    concatenate Sagittal + Coronal + Axial. The series descriptions are messy
-    (e.g., "SAG T2 FS", "t2_tse_sag", "Sagittal PD").
-    """
-    desc = (series_description or "").lower()
-
-    # 1. Identify Orientation
-    orientation = "unknown"
-    if "sag" in desc:
-        orientation = "sagittal"
-    elif "cor" in desc:
-        orientation = "coronal"
-    elif "ax" in desc:
-        orientation = "axial"
-
-    # 2. Identify Contrast Weighting. STIR is checked before T1/T2: real-world knee
-    # protocols very commonly name STIR series "T2 STIR" / "COR T2 STIR" (STIR has
-    # T2-like contrast characteristics), so checking "t2" first would misclassify
-    # one of the most clinically important fat-suppressed sequences as plain T2.
-    weighting = "unknown"
-    if "stir" in desc:
-        weighting = "stir"
-    elif "t1" in desc:
-        weighting = "t1"
-    elif "t2" in desc:
-        weighting = "t2"
-    elif "pd" in desc or "proton" in desc:
-        weighting = "pd"
-
-    # 3. Identify Fat Saturation
-    fat_saturated = any(token in desc for token in ("fs", "fat", "stir", "dixon", "tirm"))
-
-    return SequenceComponents(orientation=orientation, weighting=weighting, fat_saturated=fat_saturated)
+    pattern = _TOKEN_PATTERN_CACHE.get(token)
+    if pattern is None:
+        pattern = re.compile(rf"(?:^|[\s_\-]){re.escape(token)}")
+        _TOKEN_PATTERN_CACHE[token] = pattern
+    return pattern.search(text) is not None
 
 
 def identify_sequence_type(series_description: str) -> str:
     """
     Heuristically identifies the MRI sequence type and orientation from the description.
 
-    Packed-string form of `classify_sequence`, kept for existing callers/config values
-    (e.g. preferred_sequences lists) that already depend on this exact format.
+    WHY: We might want to train models specifically on Sagittal T2, or
+    concatenate Sagittal + Coronal + Axial. The series descriptions are messy
+    (e.g., "SAG T2 FS", "t2_tse_sag", "Sagittal PD").
     """
-    components = classify_sequence(series_description)
-    fat_sat = "yes" if components.fat_saturated else "no"
-    return f"{components.orientation}_{components.weighting}_fs={fat_sat}"
+    desc = series_description.lower()
+
+    # 1. Identify Orientation
+    orientation = "unknown"
+    if _contains_token(desc, "sag"):
+        orientation = "sagittal"
+    elif _contains_token(desc, "cor"):
+        orientation = "coronal"
+    elif _contains_token(desc, "ax"):
+        orientation = "axial"
+
+    # 2. Identify Contrast Weighting
+    weighting = "unknown"
+    if _contains_token(desc, "t1"):
+        weighting = "t1"
+    elif _contains_token(desc, "t2"):
+        weighting = "t2"
+    elif _contains_token(desc, "pd") or _contains_token(desc, "proton"):
+        weighting = "pd"
+    elif _contains_token(desc, "stir"):
+        weighting = "stir"
+
+    # 3. Identify Fat Saturation
+    fat_sat = "no"
+    if any(_contains_token(desc, token) for token in ("fs", "fat", "stir", "dixon", "tirm")):
+        fat_sat = "yes"
+
+    result = f"{orientation}_{weighting}_fs={fat_sat}"
+    if orientation == "unknown" and weighting == "unknown":
+        logger.debug(f"Could not classify series description {series_description!r}; heuristic returned {result!r}")
+    return result
